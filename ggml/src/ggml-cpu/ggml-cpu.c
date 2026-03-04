@@ -1677,6 +1677,11 @@ static void ggml_compute_forward_mul_mat_id(
 
 /////////////////////////////////
 
+#define PACC_PERF
+#if defined(PACC_PERF)
+#include "pacc_perf.h"
+#endif
+
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
     GGML_ASSERT(params);
 
@@ -1689,6 +1694,9 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         return;
     }
 
+#if defined(PACC_PERF)
+    int64_t cur = ggml_time_us();
+#endif
     switch (tensor->op) {
         case GGML_OP_DUP:
             {
@@ -2086,6 +2094,11 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                 GGML_ABORT("fatal error");
             }
     }
+#if defined(PACC_PERF)
+    int64_t duration = ggml_time_us() - cur;
+    GGML_LOG_INFO("time: %f, ", (double)duration / 1000.0);
+    display_info(tensor);
+#endif
 }
 
 // Android's libc implementation "bionic" does not support setting affinity
