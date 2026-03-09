@@ -1,0 +1,4 @@
+/home/heshan/src/riscv-toolchain-dir/riscv-gnu-toolchain/opt/riscv/bin/riscv64-unknown-linux-gnu-g++ -g -std=gnu++17 -fPIC -Wmissing-declarations -Wmissing-noreturn -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-array-bounds -Wextra-semi -march=rv64gc_zfh_v_zvfh -mabi=lp64d -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED -DGGML_SCHED_MAX_COPIES=4 -DGGML_SHARED -DGGML_USE_CPU_REPACK -DGGML_USE_LLAMAFILE -DGGML_USE_OPENMP -D_GLIBCXX_ASSERTIONS -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -Dggml_cpu_EXPORTS sgemm.cpp -c -o sgemm.o
+
+/home/heshan/src/riscv-toolchain-dir/riscv-gnu-toolchain/opt/riscv/bin/riscv64-unknown-linux-gnu-g++ -g -std=gnu++17 -fPIC -march=rv64gc_zfh_v_zvfh -mabi=lp64d -c gemm-driver.cpp -o gemm-driver.o
+/home/heshan/src/riscv-toolchain-dir/riscv-gnu-toolchain/opt/riscv/bin/riscv64-unknown-linux-gnu-g++ -g -std=gnu++17 -fPIC -march=rv64gc_zfh_v_zvfh -mabi=lp64d gemm-driver.o sgemm.o -o main
