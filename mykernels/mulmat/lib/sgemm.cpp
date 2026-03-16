@@ -69,7 +69,7 @@
 
 #if defined(__riscv_v_intrinsic)
 #define LMUL 4
-#endif
+#endif // #if defined(__riscv_v_intrinsic)
 
 #define MM256_SET_M128I(a, b) _mm256_insertf128_si256(_mm256_castsi128_si256(b), (a), 1)
 
@@ -458,6 +458,189 @@ template <typename T> size_t vlmax() {
 }
 #endif
 
+
+
+typedef double ggml_float;
+
+static void ggml_vec_dot_bf16(int n, float * GGML_RESTRICT s, size_t bs, ggml_bf16_t * GGML_RESTRICT x, size_t bx, ggml_bf16_t * GGML_RESTRICT y, size_t by, int nrc) {
+    assert(nrc == 1);
+    GGML_UNUSED(nrc);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    GGML_UNUSED(bs);
+    int i = 0;
+    ggml_float sumf = 0;
+
+#if defined(__AVX512BF16__)
+    __m512 c1 = _mm512_setzero_ps();
+    __m512 c2 = _mm512_setzero_ps();
+    for (; i + 64 <= n; i += 64) {
+        c1 = _mm512_dpbf16_ps(c1, m512bh(_mm512_loadu_si512((x + i))),
+                             m512bh(_mm512_loadu_si512((y + i))));
+        c2 = _mm512_dpbf16_ps(c2, m512bh(_mm512_loadu_si512((x + i + 32))),
+                             m512bh(_mm512_loadu_si512((y + i + 32))));
+    }
+    sumf += (ggml_float)_mm512_reduce_add_ps(c1);
+    sumf += (ggml_float)_mm512_reduce_add_ps(c2);
+
+#elif defined(__AVX512F__)
+#define LOAD(p) _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((const __m256i *)(p))), 16))
+    __m512 c1 = _mm512_setzero_ps();
+    __m512 c2 = _mm512_setzero_ps();
+    for (; i + 32 <= n; i += 32) {
+        c1 = _mm512_add_ps(_mm512_mul_ps(LOAD(x + i), LOAD(y + i)), c1);
+        c2 = _mm512_add_ps(_mm512_mul_ps(LOAD(x + i + 16), LOAD(y + i + 16)), c2);
+    }
+    sumf += (ggml_float)_mm512_reduce_add_ps(c1);
+    sumf += (ggml_float)_mm512_reduce_add_ps(c2);
+
+#undef LOAD
+#elif defined(__AVX2__) || defined(__AVX__)
+#if defined(__AVX2__)
+#define LOAD(p) _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i *)(p))), 16))
+#else
+#define LOAD(p) _mm256_castsi256_ps(_mm256_insertf128_si256(_mm256_castsi128_si256(_mm_slli_epi32(_mm_cvtepu16_epi32(_mm_loadu_si128((const __m128i *)(p))), 16)), (_mm_slli_epi32(_mm_cvtepu16_epi32(_mm_bsrli_si128(_mm_loadu_si128((const __m128i *)(p)), 8)), 16)), 1))
+#endif
+    __m256 c1 = _mm256_setzero_ps();
+    __m256 c2 = _mm256_setzero_ps();
+    __m256 c3 = _mm256_setzero_ps();
+    __m256 c4 = _mm256_setzero_ps();
+    for (; i + 32 <= n; i += 32) {
+        c1 = _mm256_add_ps(_mm256_mul_ps(LOAD(x + i), LOAD(y + i)), c1);
+        c2 = _mm256_add_ps(_mm256_mul_ps(LOAD(x + i + 8), LOAD(y + i + 8)), c2);
+        c3 = _mm256_add_ps(_mm256_mul_ps(LOAD(x + i + 16), LOAD(y + i + 16)), c3);
+        c4 = _mm256_add_ps(_mm256_mul_ps(LOAD(x + i + 24), LOAD(y + i + 24)), c4);
+    }
+    __m128 g;
+    c1 = _mm256_add_ps(_mm256_add_ps(c1, c3),
+                       _mm256_add_ps(c2, c4));
+    g = _mm_add_ps(_mm256_extractf128_ps(c1, 1),
+                   _mm256_castps256_ps128(c1));
+    g = _mm_add_ps(g, _mm_movehl_ps(g, g));
+    g = _mm_add_ss(g, _mm_movehdup_ps(g));
+    sumf += (ggml_float)_mm_cvtss_f32(g);
+
+#undef LOAD
+#elif defined(__riscv_v_intrinsic) && defined(__riscv_zvfbfwma)
+    size_t vl = __riscv_vsetvlmax_e32m4();
+
+    // initialize accumulators to all zeroes
+    vfloat32m4_t vsum0 = __riscv_vfmv_v_f_f32m4(0.0f, vl);
+    vfloat32m4_t vsum1 = __riscv_vfmv_v_f_f32m4(0.0f, vl);
+
+    // calculate step size
+    const size_t epr = __riscv_vsetvlmax_e16m2();
+    const size_t step = epr * 2;
+    const int np = (n & ~(step - 1));
+
+    // unroll by 2
+    for (; i < np; i += step) {
+        vbfloat16m2_t ax0 = __riscv_vle16_v_bf16m2((const __bf16 *)&x[i], epr);
+        vbfloat16m2_t ay0 = __riscv_vle16_v_bf16m2((const __bf16 *)&y[i], epr);
+        vsum0 = __riscv_vfwmaccbf16_vv_f32m4(vsum0, ax0, ay0, epr);
+        __asm__ __volatile__ ("" ::: "memory");
+
+        vbfloat16m2_t ax1 = __riscv_vle16_v_bf16m2((const __bf16 *)&x[i + epr], epr);
+        vbfloat16m2_t ay1 = __riscv_vle16_v_bf16m2((const __bf16 *)&y[i + epr], epr);
+        vsum1 = __riscv_vfwmaccbf16_vv_f32m4(vsum1, ax1, ay1, epr);
+        __asm__ __volatile__ ("" ::: "memory");
+    }
+
+    // accumulate in 1 register
+    vsum0 = __riscv_vfadd_vv_f32m4(vsum0, vsum1, vl);
+
+    // leftovers
+    for (i = np; i < n; i += vl) {
+        vl = __riscv_vsetvl_e16m2(n - i);
+        vbfloat16m2_t ax0 = __riscv_vle16_v_bf16m2((const __bf16 *)&x[i], vl);
+        vbfloat16m2_t ay0 = __riscv_vle16_v_bf16m2((const __bf16 *)&y[i], vl);
+        vsum0 = __riscv_vfwmaccbf16_vv_f32m4(vsum0, ax0, ay0, vl);
+    }
+
+    // reduce
+    vl = __riscv_vsetvlmax_e32m4();
+    vfloat32m1_t redsum = __riscv_vfredusum_vs_f32m4_f32m1(vsum0, __riscv_vfmv_v_f_f32m1(0.0f, 1), vl);
+    sumf += __riscv_vfmv_f_s_f32m1_f32(redsum);
+
+#endif
+
+    for (; i < n; ++i) {
+        sumf += (ggml_float)(GGML_BF16_TO_FP32(x[i]) *
+                             GGML_BF16_TO_FP32(y[i]));
+    }
+    *s = sumf;
+}
+
+void ggml_vec_dot_f16(int n, float * GGML_RESTRICT s, size_t bs, ggml_fp16_t * GGML_RESTRICT x, size_t bx, ggml_fp16_t * GGML_RESTRICT y, size_t by, int nrc) {
+    assert(nrc == 1);
+    GGML_UNUSED(nrc);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    GGML_UNUSED(bs);
+
+    ggml_float sumf = 0.0;
+
+
+#if defined(GGML_SIMD)
+    #if defined(__riscv_v_intrinsic)
+        #if defined(__riscv_zvfh)
+            int vl = __riscv_vsetvlmax_e32m2();
+            vfloat32m1_t vs = __riscv_vfmv_v_f_f32m1(0.0f, 1);
+            vfloat32m2_t vsum;
+            vfloat16m1_t ax;
+            vfloat16m1_t ay;
+            vsum = __riscv_vreinterpret_v_u32m2_f32m2(__riscv_vmv_v_x_u32m2(0, vl));
+            for (int i = 0; i < n; i += vl) {
+                vl = __riscv_vsetvl_e16m1(n - i);
+                ax = __riscv_vle16_v_f16m1_tu(ax, (const _Float16 *)&x[i], vl);
+                ay = __riscv_vle16_v_f16m1_tu(ay, (const _Float16 *)&y[i], vl);
+                vsum = __riscv_vfwmacc_vv_f32m2_tu(vsum, ax, ay, vl);
+            }
+            vl = __riscv_vsetvlmax_e32m1();
+            vfloat32m1_t ac0 = __riscv_vfadd_vv_f32m1(__riscv_vget_v_f32m2_f32m1(vsum, 0), __riscv_vget_v_f32m2_f32m1(vsum, 1), vl);
+            vs = __riscv_vfredusum_vs_f32m1_f32m1(ac0, vs, vl);
+            sumf += __riscv_vfmv_f_s_f32m1_f32(vs);
+        #else
+            for (int i = 0; i < n; ++i) {
+                sumf += (ggml_float)(GGML_CPU_FP16_TO_FP32(x[i])*GGML_CPU_FP16_TO_FP32(y[i]));
+            }
+        #endif // __riscv_zvfh
+    #else
+        const int np = (n & ~(GGML_F16_STEP - 1));
+
+        GGML_F16_VEC sum[GGML_F16_ARR] = { GGML_F16_VEC_ZERO };
+
+        GGML_F16_VEC ax[GGML_F16_ARR];
+        GGML_F16_VEC ay[GGML_F16_ARR];
+
+        for (int i = 0; i < np; i += GGML_F16_STEP) {
+            for (int j = 0; j < GGML_F16_ARR; j++) {
+                ax[j] = GGML_F16_VEC_LOAD(x + i + j*GGML_F16_EPR, j);
+                ay[j] = GGML_F16_VEC_LOAD(y + i + j*GGML_F16_EPR, j);
+
+                sum[j] = GGML_F16_VEC_FMA(sum[j], ax[j], ay[j]);
+            }
+        }
+
+        // reduce sum0..sum3 to sum0
+        GGML_F16_VEC_REDUCE(sumf, sum);
+
+        // leftovers
+        for (int i = np; i < n; ++i) {
+            sumf += (ggml_float)(GGML_CPU_FP16_TO_FP32(x[i])*GGML_CPU_FP16_TO_FP32(y[i]));
+        }
+        // if you hit this, you are likely running outside the FP range
+        assert(!isnan(sumf) && !isinf(sumf));
+    #endif
+#else
+    for (int i = 0; i < n; ++i) {
+        sumf += (ggml_float)(GGML_CPU_FP16_TO_FP32(x[i])*GGML_CPU_FP16_TO_FP32(y[i]));
+    }
+#endif // GGML_SIMD
+
+    *s = sumf;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FLOATING POINT MATRIX MULTIPLICATION
 
@@ -631,9 +814,11 @@ class tinyBLAS_RVV {
     }
 
     bool matmul(int64_t m, int64_t n) {
+        /*
         if (k % vlmax<V>() != 0) {
             return false;
         }
+        */
 
 #if LMUL == 1
         if (m % 16 == 0 && (m/16 >= params->nth)) {
@@ -2802,6 +2987,7 @@ class tinyBLAS_PPC {
 #endif
 } // namespace
 
+
 /**
  * Performs optimized matrix multiplication on CPU.
  *
@@ -2832,6 +3018,41 @@ class tinyBLAS_PPC {
  * @param Ctype is GGML data type of `C`
  * @return true if this function was able to service the matmul request
  */
+
+void mul_mat_f16(int m, int n, int k,
+                 const uint16_t *A, int lda, // lda in bytes
+                 const uint16_t *B, int ldb, // ldb in bytes
+                 float *C, int ldc) {
+
+    ggml_fp16_t * aa = (ggml_fp16_t *)const_cast<uint16_t*>(A);
+    ggml_fp16_t * bb = (ggml_fp16_t *)const_cast<uint16_t*>(B);
+    for (int mm = 0; mm < m; ++mm) {
+        for (int nn = 0; nn < n; ++nn) {
+            float * dst = &C[mm + m * nn];
+            ggml_fp16_t * a = &aa[mm * k];
+            ggml_fp16_t * b = &bb[nn * k];
+            ggml_vec_dot_f16(k, dst, 0, a, 0, b, 0, 1);
+        }
+    }
+}
+
+void mul_mat_bf16(int m, int n, int k,
+                 const uint16_t *A, int lda, // lda in bytes
+                 const uint16_t *B, int ldb, // ldb in bytes
+                 float *C, int ldc) {
+
+    ggml_bf16_t * aa = (ggml_bf16_t *)const_cast<uint16_t*>(A);
+    ggml_bf16_t * bb = (ggml_bf16_t *)const_cast<uint16_t*>(B);
+    for (int mm = 0; mm < m; ++mm) {
+        for (int nn = 0; nn < n; ++nn) {
+            float * dst = &C[mm + m * nn];
+            ggml_bf16_t * a = &aa[mm * k];
+            ggml_bf16_t * b = &bb[nn * k];
+            ggml_vec_dot_bf16(k, dst, 0, a, 0, b, 0, 1);
+        }
+    }
+}
+
 
 #include <cstdio>
 
@@ -3070,3 +3291,37 @@ bool llamafile_sgemm(int64_t m, int64_t n, int64_t k,
     (void)Btype;
     (void)Ctype;
 }
+
+/*
+void mul_mat_f16(int m, int n, int k,
+                 const uint16_t *A, int lda, // lda in bytes
+                 const uint16_t *B, int ldb, // ldb in bytes
+                 float *C, int ldc) {
+    assert(lda ==  k * 2);
+    assert(ldb ==  k * 2);
+    assert(ldc ==  m * 4);
+    (void)llamafile_sgemm(m, n, k,
+                    A, lda / 2,
+                    B, ldb / 2,
+                    C, ldc / 4,
+                    GGML_TYPE_F16,
+                    GGML_TYPE_F16,
+                    GGML_TYPE_F32);
+}
+
+void mul_mat_bf16(int m, int n, int k,
+                  const uint16_t *A, int lda, // lda in bytes
+                  const uint16_t *B, int ldb, // ldb in bytes
+                  float *C, int ldc) {
+    assert(lda ==  k * 2);
+    assert(ldb ==  k * 2);
+    assert(ldc ==  m * 4);
+    (void)llamafile_sgemm(m, n, k,
+                    A, lda / 2,
+                    B, ldb / 2,
+                    C, ldc / 4,
+                    GGML_TYPE_F16,
+                    GGML_TYPE_F16,
+                    GGML_TYPE_F32);
+}
+*/
