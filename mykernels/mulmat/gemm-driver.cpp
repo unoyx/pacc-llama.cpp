@@ -49,6 +49,7 @@ float cosine_dist(std::vector<float> a, std::vector<float> b) {
     cosine_similarity = std::clamp(cosine_similarity, -1.0, 1.0);
 
     // Cosine distance is 1 - cosine similarity, range [0, 2]
+    // similar is 0
     return 1.0 - cosine_similarity;
 }
 
