@@ -1,98 +1,17 @@
-#include <cstdio>
-#include <cstdlib>
-#include <cstdint>
-#include <cassert>
-#include <stdexcept>
-#include <vector>
+#include "ggml.h"
+#include "tools.h"
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <cmath>
 #include <algorithm>
 
 #include "ggml.h"
 #include "ggml-impl.h"
-#include "sgemm.h"
 
 using namespace std;
 
-enum Matrix2DLayout
-{
-    ROW_MAJOR,
-    COL_MAJOR,
-};
-
-struct Matrix2D
-{
-
-    Matrix2D(int row, int col, enum Matrix2DLayout layout = ROW_MAJOR)
-    :layout(layout), m_row(row), m_col(col) {
-        assert(m_row > 0);
-        assert(m_col > 0);
-
-        data.resize(m_row * m_col);
-    }
-
-    Matrix2D(int row, int col, vector<float> data, enum Matrix2DLayout layout = ROW_MAJOR)
-    :layout(layout), m_row(row), m_col(col), data(data) {
-        assert(m_row > 0);
-        assert(m_col > 0);
-        assert(data.size() == (m_row * m_col));
-    }
-
-    float& operator()(int row, int col) {
-        if (row < 0 || row >= m_row || col < 0 || col >= m_col) {
-            throw std::out_of_range("Index out of bounds");
-        }
-        if (layout == ROW_MAJOR) {
-            return data[row * m_col + col];
-        } else {
-            return data[row + col * m_row];
-        }
-    }
-
-    const float& operator()(int row, int col) const {
-        if (row < 0 || row >= m_row || col < 0 || col >= m_col) {
-            throw std::out_of_range("Index out of bounds");
-        }
-        if (layout == ROW_MAJOR) {
-            return data[row * m_col + col];
-        } else {
-            return data[row + col * m_row];
-        }
-    }
-
-    vector<float> get_data() const {
-        return data;
-    }
-
-    void show() const {
-        printf("row: %d, col: %d\n", m_row, m_col);
-        for (int i = 0; i < m_row; ++i) {
-            for (int j = 0; j < m_col; ++j) {
-                float e = this->operator()(i, j);
-                printf("%f, ", e);
-            }
-            printf("\n");
-        }
-    }
-
-    int get_row() const {
-        return m_row;
-    }
-
-    int get_col() const {
-        return m_col;
-    }
-
-    enum Matrix2DLayout get_layout() const {
-        return layout;
-    }
-
-    enum Matrix2DLayout layout = ROW_MAJOR;
-    int m_row = 0;
-    int m_col = 0;
-    vector<float> data;
-};
-
-float cosine_dist(vector<float> a, vector<float> b) {
+float cosine_dist(std::vector<float> a, std::vector<float> b) {
     if (a.size() != b.size()) {
         throw std::invalid_argument("Vectors must be of the same length.");
     }
@@ -133,16 +52,12 @@ float cosine_dist(vector<float> a, vector<float> b) {
     return 1.0 - cosine_similarity;
 }
 
-#include <endian.h>
-#include <filesystem>
-#include <fstream>
-
-void save_floats(vector<float> v, const string & f) {
+void save_floats(std::vector<float> v, const string & f) {
     if (v.empty()) {
         throw std::runtime_error("save empty vector");
     }
 
-    vector<uint32_t> data(v.size());
+    std::vector<uint32_t> data(v.size());
     for (int i = 0; i < v.size(); ++i) {
         data[i] = htole32(*((uint32_t *)(&v[i])));
     }
@@ -155,7 +70,7 @@ void save_floats(vector<float> v, const string & f) {
     file.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
 }
 
-vector<float> load_floats(const string & f)
+std::vector<float> load_floats(const string & f)
 {
     auto path = std::filesystem::path{f};
     // Open the file in binary mode and go to the end
@@ -195,7 +110,7 @@ vector<float> load_floats(const string & f)
     return ret;
 }
 
-vector<float> bin2floats(vector<char> bdata) {
+std::vector<float> bin2floats(std::vector<char> bdata) {
     if ((bdata.size() % sizeof(float)) != 0) {
         throw std::runtime_error("invalid file size");
     }
@@ -213,117 +128,21 @@ vector<float> bin2floats(vector<char> bdata) {
     return ret;
 }
 
-static void simple_test_mm_row_col() {
-    int m = 8;
-    int n = 2;
-    int k = 32;
-
-    Matrix2D mm_a(m, k);
-    for (int i = 0; i < mm_a.get_row(); ++i) {
-        for (int j = 0; j < mm_a.get_col(); ++j) {
-            mm_a(i, j) = i;
-        }
-    }
-    mm_a.show();
-
-    Matrix2D mm_b(k, n, COL_MAJOR);
-    for (int i = 0; i < mm_b.get_row(); ++i) {
-        for (int j = 0; j < mm_b.get_col(); ++j) {
-            mm_b(i, j) = j;
-        }
-    }
-    mm_b.show();
-
-    vector<ggml_fp16_t> mm_a_fp16;
-    for (auto e : mm_a.get_data()) {
-        mm_a_fp16.push_back(ggml_compute_fp32_to_fp16(e));
-    }
-
-    vector<ggml_fp16_t> mm_b_fp16;
-    for (auto e : mm_b.get_data()) {
-        mm_b_fp16.push_back(ggml_compute_fp32_to_fp16(e));
-    }
-
-    vector<float> mm_c(m * n);
-    float * mm_c_data = mm_c.data();
-
-    bool is_calculate = llamafile_sgemm(m, n, k, mm_a_fp16.data(), k, mm_b_fp16.data(), k, mm_c_data, m, GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_F32);
-
-    printf("is_calculate: %d\n", is_calculate);
-
-    Matrix2D c(m, n, mm_c, COL_MAJOR);
-
-    for (int i = 0; i < m * n; ++i) {
-        printf("%f, ", mm_c_data[i]);
-    }
-    printf("\n");
-
-    c.show();
-}
-
-static void simple_test_mm_col_row() {
-    int m = 8;
-    int n = 2;
-    int k = 32;
-
-    Matrix2D mm_a(m, k);
-    for (int i = 0; i < mm_a.get_row(); ++i) {
-        for (int j = 0; j < mm_a.get_col(); ++j) {
-            mm_a(i, j) = j;
-        }
-    }
-    mm_a.show();
-
-    Matrix2D mm_b(k, n, COL_MAJOR);
-    for (int i = 0; i < mm_b.get_row(); ++i) {
-        for (int j = 0; j < mm_b.get_col(); ++j) {
-            mm_b(i, j) = i;
-        }
-    }
-    mm_b.show();
-
-    vector<ggml_fp16_t> mm_a_fp16;
-    for (auto e : mm_a.get_data()) {
-        mm_a_fp16.push_back(ggml_compute_fp32_to_fp16(e));
-    }
-
-    vector<ggml_fp16_t> mm_b_fp16;
-    for (auto e : mm_b.get_data()) {
-        mm_b_fp16.push_back(ggml_compute_fp32_to_fp16(e));
-    }
-
-    vector<float> mm_c(m * n);
-    float * mm_c_data = mm_c.data();
-
-    bool is_calculate = llamafile_sgemm(m, n, k, mm_a_fp16.data(), k, mm_b_fp16.data(), k, mm_c_data, m, GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_F32);
-
-    printf("is_calculate: %d\n", is_calculate);
-
-    Matrix2D c(m, n, mm_c, COL_MAJOR);
-
-    for (int i = 0; i < m * n; ++i) {
-        printf("%f, ", mm_c_data[i]);
-    }
-    printf("\n");
-
-    c.show();
-}
-
-static vector<float> to_floats(const void * ptr, int n, int type) {
+vector<float> to_floats(const void * ptr, int n, int type) {
     vector<float> ret;
     // float
-    if (type == 0) {
+    if (type == GGML_TYPE_F32) {
         const auto * pp = (const float *)ptr;
         for (int i = 0; i < n; ++i) {
             ret.push_back(pp[i]);
         }
     // bf16
-    } else if (type == 1) {
+    } else if (type == GGML_TYPE_BF16) {
         const auto * pp = (const ggml_bf16_t *)ptr;
         for (int i = 0; i < n; ++i) {
             ret.push_back(ggml_compute_bf16_to_fp32(pp[i]));
         }
-    } else if (type == 2) {
+    } else if (type == GGML_TYPE_F16) {
         const auto * pp = (const ggml_fp16_t *)ptr;
         for (int i = 0; i < n; ++i) {
             ret.push_back(ggml_compute_fp16_to_fp32(pp[i]));
@@ -332,7 +151,7 @@ static vector<float> to_floats(const void * ptr, int n, int type) {
     return ret;
 }
 
-static vector<uint32_t> floats2bin(vector<float> f) {
+vector<uint32_t> floats2bin(vector<float> f) {
     vector<uint32_t> data(f.size());
     for (int i = 0; i < f.size(); ++i) {
         data[i] = htole32(*((uint32_t *)(&f[i])));
@@ -340,16 +159,15 @@ static vector<uint32_t> floats2bin(vector<float> f) {
     return data;
 }
 
-static void save_mm_golden(int64_t m, int64_t n, int64_t k,
+void save_mm_golden(int64_t m, int64_t n, int64_t k,
                      const void *A, int64_t lda,
                      const void *B, int64_t ldb,
                      const void *C, int64_t ldc,
-                     int32_t Atype, int32_t Btype, int32_t Ctype, string file_name) {
+                     int32_t Atype, int32_t Btype, int32_t Ctype, std::filesystem::path path) {
     vector<uint32_t> tA = floats2bin(to_floats(A, m * k, Atype));
     vector<uint32_t> tB = floats2bin(to_floats(B, n * k, Btype));
     vector<uint32_t> tC = floats2bin(to_floats(C, m * n, Ctype));
 
-    auto path = std::filesystem::path{file_name};
     std::ofstream file{path, std::ios::binary};
     uint64_t bm = htole64(m);
     uint64_t bn = htole64(n);
@@ -366,9 +184,10 @@ static void save_mm_golden(int64_t m, int64_t n, int64_t k,
     file.write(reinterpret_cast<const char*>(tA.data()), sizeof(uint32_t) * tA.size());
     file.write(reinterpret_cast<const char*>(tB.data()), sizeof(uint32_t) * tB.size());
     file.write(reinterpret_cast<const char*>(tC.data()), sizeof(uint32_t) * tC.size());
+    file.close();
 }
 
-static void load_mm_golden(string file_name,
+void load_mm_golden(std::filesystem::path file_path,
                            int64_t *pm, int64_t *pn, int64_t *pk,
                            int32_t *pAtype, int32_t *pBtype, int32_t *pCtype,
                            vector<float> *pA, vector<float> *pB, vector<float> *pC) {
@@ -382,8 +201,7 @@ static void load_mm_golden(string file_name,
     assert(pB != nullptr);
     assert(pC != nullptr);
 
-    auto path = std::filesystem::path{file_name};
-    std::ifstream file{path, std::ios::binary};
+    std::ifstream file{file_path, std::ios::binary};
 
     uint64_t t64;
 
@@ -445,71 +263,3 @@ void init_ggml_table_f32_f16()
         }
     }
 }
-
-
-int main()
-{
-    init_ggml_table_f32_f16();
-    /*
-    simple_test_mm_row_col();
-    simple_test_mm_col_row();
-    */
-
-    int m = 2;
-    int n = 3;
-    int k = 4;
-
-    vector<float> va(m * k);
-    for (int i = 0; i < va.size(); ++i) {
-        va.at(i) = i;
-    }
-    vector<float> vb(n * k);
-    for (int i = 0; i < vb.size(); ++i) {
-        vb.at(i) = i;
-    }
-    vector<float> vc(m * n);
-    for (int i = 0; i < vc.size(); ++i) {
-        vc.at(i) = i;
-    }
-
-    save_mm_golden(m, n, k, va.data(), 0, vb.data(), 0, vc.data(), 0, 0, 0, 0, "golden.bin");
-
-    int64_t gm;
-    int64_t gn;
-    int64_t gk;
-
-    int32_t ta;
-    int32_t tb;
-    int32_t tc;
-
-    vector<float> gA;
-    vector<float> gB;
-    vector<float> gC;
-
-    load_mm_golden("golden.bin",
-                           &gm, &gn, &gk,
-                           &ta, &tb, &tc,
-                           &gA, &gB, &gC);
-
-    printf("A: ");
-    for (auto e : gA) {
-        printf("%f, ", e);
-    }
-    printf("%d\n", gA.size());
-
-    printf("B: ");
-    for (auto e : gB) {
-        printf("%f, ", e);
-    }
-    printf("%d\n", gB.size());
-
-    printf("C: ");
-    for (auto e : gC) {
-        printf("%f, ", e);
-    }
-    printf("%d\n", gC.size());
-
-
-    return 0;
-}
-
