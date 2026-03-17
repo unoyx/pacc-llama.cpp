@@ -37,32 +37,49 @@ add_subdirectory(lib)
 
 if(TARGET_ARCH STREQUAL "riscv")
     # 添加可执行文件
-    add_executable(riscv-gemm-driver
-        src/pacc-gemm-driver.cpp
+    add_executable(rv-golden-gen
+        src/golden_gen.cpp
         src/tools.cpp
-    )
-    # 为可执行文件添加头文件路径
-    target_include_directories(riscv-gemm-driver PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
 
     # 链接库
-    target_link_libraries(riscv-gemm-driver PRIVATE mykernels)
+    target_link_libraries(rv-golden-gen PRIVATE mykernels)
 
-    target_compile_definitions(riscv-gemm-driver PRIVATE
+    # 为可执行文件添加头文件路径
+    target_include_directories(rv-golden-gen PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_definitions(rv-golden-gen PRIVATE
         ARCH_RISCV
-        RISCV_VERSION=1
     )
 
-    # RISC-V特定编译选项
-    target_compile_options(riscv-gemm-driver PRIVATE
+    # x86特定编译选项
+    target_compile_options(rv-golden-gen PRIVATE
         -march=rv64gc_zfh_v_zvfh
         -mabi=lp64d
     )
 
-    # RISC-V特定链接选项
-    target_link_options(riscv-gemm-driver PRIVATE
-        -static
+    # 添加可执行文件
+    add_executable(test-by-golden
+        src/test-by-golden.cpp
+        src/tools.cpp
+    )
+
+    # 链接库
+    target_link_libraries(test-by-golden PRIVATE mykernels)
+
+    # 为可执行文件添加头文件路径
+    target_include_directories(test-by-golden PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_definitions(test-by-golden PRIVATE
+        ARCH_RISCV
+    )
+
+    # x86特定编译选项
+    target_compile_options(test-by-golden PRIVATE
+        -march=rv64gc_zfh_v_zvfh
+        -mabi=lp64d
     )
 elseif(TARGET_ARCH STREQUAL "x86")
     # 添加可执行文件

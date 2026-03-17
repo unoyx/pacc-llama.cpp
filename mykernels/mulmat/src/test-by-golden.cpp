@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <vector>
 #include <filesystem>
+#include <numeric>
 
 #include "ggml.h"
 #include "ggml-impl.h"
@@ -62,6 +63,28 @@ static void simple_golden_test(std::filesystem::path dir) {
 
         float dis = cosine_dist(mC, calC);
         printf("m:%d, n:%d, k:%d, cosdist: %f, calculated: %d\n", m, n, k, dis, ret);
+        if (dis > 0) {
+            /*
+            double sum_of_golden = std::accumulate(mC.begin(), mC.end(), 0);
+            double sum_of_result = std::accumulate(calC.begin(), calC.end(), 0);
+            printf("sum_of_golden: %f\n", sum_of_golden);
+            printf("sum_of_result: %f\n", sum_of_result);
+
+            Matrix2D mm_a(m, k, mA);
+            mm_a.show();
+
+            Matrix2D mm_b(m, k, mB, COL_MAJOR);
+            mm_b.show();
+
+            Matrix2D c_golden(m, n, mC, COL_MAJOR);
+            printf("_golden:\n");
+            c_golden.show();
+            Matrix2D c_result(m, n, calC, COL_MAJOR);
+            printf("_result:\n");
+            c_result.show();
+            */
+            return;
+        }
     }
 }
 
