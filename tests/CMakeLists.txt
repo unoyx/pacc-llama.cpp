@@ -251,6 +251,7 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-quantize-perf.cpp)
     llama_build_and_test(test-rope.cpp)
     llama_build_and_test(test-single-mulmat.cpp)
+    llama_build_and_test(test-pacc-backend.cpp)
 endif()
 
 # libmtmd

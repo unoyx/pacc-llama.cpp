@@ -4,6 +4,7 @@
 static void display_info(const struct ggml_tensor *t)
 {
     GGML_LOG_INFO("op type: %s, ", ggml_op_name(t->op));
+    GGML_LOG_INFO("tensor name: %s, ", t->name);
 
     GGML_LOG_INFO("data type: %s, ", ggml_type_name(t->type));
     GGML_LOG_INFO("dim0: %zu, dim1: %zu, dim2: %zu, dim3: %zu, ", t->ne[0], t->ne[1], t->ne[2], t->ne[3]);

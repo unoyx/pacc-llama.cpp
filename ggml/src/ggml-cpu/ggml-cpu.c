@@ -1695,7 +1695,7 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
     }
 
 #if defined(PACC_PERF)
-    int64_t cur = ggml_time_us();
+    int64_t start = ggml_time_us();
 #endif
     switch (tensor->op) {
         case GGML_OP_DUP:
@@ -2095,8 +2095,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             }
     }
 #if defined(PACC_PERF)
-    int64_t duration = ggml_time_us() - cur;
-    GGML_LOG_INFO("time: %f, ", (double)duration / 1000.0);
+    int64_t end = ggml_time_us();
+    int64_t duration = end - start;
+    GGML_LOG_INFO("rel time: %f, ", (double)duration / 1000.0);
+    GGML_LOG_INFO("abs time: %ld, ", end);
     display_info(tensor);
 #endif
 }

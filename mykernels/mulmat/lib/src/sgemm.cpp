@@ -802,6 +802,7 @@ class tinyBLAS {
     const int64_t ldc;
 };
 
+#define __riscv_v_intrinsic
 #if defined(__riscv_v_intrinsic)
 template <typename D, typename V, typename TA, typename TB, typename TC>
 class tinyBLAS_RVV {
