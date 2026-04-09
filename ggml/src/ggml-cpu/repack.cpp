@@ -3019,6 +3019,150 @@ class tensor_traits_base : public ggml::cpu::tensor_traits {
     virtual int repack(struct ggml_tensor * t, const void * data, size_t data_size) = 0;
 };
 
+// #include <string>
+#include <vector>
+
+/*
+    0, 0, 0, 0, 1, 1, 1, 1, 2, 2,
+    3, 3, 3, 3, 4, 4, 4, 4, 5, 5,
+    6, 6, 6, 6, 7, 7, 7, 7, 8, 8,
+
+    假设输入数据如上，列主序(R == 3, C == 10, B == 4)。内存内的排布为
+    0, 3, 6, 0, 3, 6, 0, 3, 6, 0, 3, 6, 1, 4, 7, 1, 4, 7, 1, 4, 7, 1, 4, 7, ...
+
+    重排为
+    0, 0, 0, 0, 3, 3, 3, 3, 6, 6, 6, 6, 1, 1, 1, 1, 4, 4, 4, 4, 7, 7, 7, 7, ...
+*/
+template<typename T>
+void layout_convert_col(const T* src, std::vector<T>& dst, int R, int C, int B)
+{
+    if (R <= 0 || C <= 0 || B <= 0) return;
+
+    // 需要处理的逻辑block数量
+    int num_blocks = (C + B - 1) / B;  // ceil(C/B)
+
+    // 依次处理各个block
+    for (int block = 0; block < num_blocks; block++) {
+        int block_start_col = block * B;
+        int actual_width = std::min(B, C - block_start_col);
+        // 输入数据为列主序，每个block整体是连续的
+        int block_start_pos = block * B * R;
+
+        // 临时数组，用来重排当前block的数据
+        std::vector<T> block_reoder(actual_width * R);
+
+        int src_idx = 0;
+        int dst_idx = 0;
+        for (int row = 0; row < R; row++) {
+            for (int col = 0; col < actual_width; col++) {
+
+                dst_idx = row * actual_width + col;
+                block_reoder.at(dst_idx) = src[src_idx + block_start_pos];
+                src_idx++;
+            }
+        }
+
+        // 复制一个block到目标位置
+        std::copy(block_reoder.begin(), block_reoder.end(), dst.begin() + block_start_pos);
+    }
+}
+
+/*
+    0, 0, 0, 0, 1, 1, 1, 1, 2, 2,
+    3, 3, 3, 3, 4, 4, 4, 4, 5, 5,
+    6, 6, 6, 6, 7, 7, 7, 7, 8, 8,
+
+    假设输入数据如上，行主序(R == 3, C == 10, B == 4)。内存内的排布为
+    0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 6, 6, 6, 6, ...
+
+    重排为
+    0, 0, 0, 0, 3, 3, 3, 3, 6, 6, 6, 6, 1, 1, 1, 1, 4, 4, 4, 4, 7, 7, 7, 7, ...
+*/
+template<typename T>
+void layout_convert_row(const T* src, std::vector<T>& dst, int R, int C, int B) {
+    if (R <= 0 || C <= 0 || B <= 0) return;
+
+    // 需要处理的逻辑块数
+    int num_blocks = (C + B - 1) / B;  // ceil(C/B)
+
+    for (int block = 0; block < num_blocks; block++) {
+        int block_start_col = block * B;
+        // 最后一个block的有效元素个数可能不足B
+        int actual_width = std::min(B, C - block_start_col);
+
+        // 临时数组，用来重排当前block的数据
+        std::vector<T> block_reoder(actual_width * R);
+
+        int src_idx = 0;
+        int dst_idx = 0;
+        for (int row = 0; row < R; row++) {
+            for (int col = 0; col < actual_width; col++) {
+                // input is row major
+                // block * B: 第一个元素位置
+                // row * C: 原始元素是行主序，C为行的stride
+                src_idx = block * B + row * C + col;
+                block_reoder.at(dst_idx) = src[src_idx];
+                dst_idx++;
+            }
+        }
+
+        // 复制一个block的到目标位置
+        std::copy(block_reoder.begin(), block_reoder.end(), dst.begin() + block * B * R);
+    }
+}
+
+class pacc_ext_tensor_traits : public tensor_traits_base {
+public:
+    // just direct copy from
+    bool work_size(int /* n_threads */, const struct ggml_tensor * op, size_t & size) override {
+        // not realy a GGML_TYPE_Q8_0 but same size.
+        switch (op->op) {
+            case GGML_OP_MUL_MAT:
+                {
+                    size = ggml_row_size(GGML_TYPE_F16, ggml_nelements(op->src[1]));
+                    return true;
+                }
+            case GGML_OP_MUL_MAT_ID:
+                {
+                    size = ggml_row_size(GGML_TYPE_F16, ggml_nelements(op->src[1]));
+                    // 猜测fp16应该没有pad的需要
+                    // size = GGML_PAD(size, sizeof(int64_t)); // + padding for next bloc.
+
+                    const int64_t ne02 = op->src[0]->ne[2]; // n_as, n_expert
+                    const int64_t ne12 = op->src[1]->ne[2]; // n_tokens
+
+                    const size_t sizeof_mmid_row_mapping = sizeof(int64_t);
+
+                    size += sizeof_mmid_row_mapping*ne02*(ne12 + 1);
+
+                    return true;
+                }
+            default:
+                // GGML_ABORT("fatal error");
+                break;
+        }
+        return false;
+    }
+
+    bool compute_forward(struct ggml_compute_params * params, struct ggml_tensor * op) override {
+        UNUSED(params);
+        UNUSED(op);
+        return false;
+    }
+
+    int repack(struct ggml_tensor * t, const void * data, size_t data_size) override {
+
+        int R = t->ne[0];
+        int C = t->ne[1];
+        const int B = 256;
+        std::vector<int16_t> dst(data_size / sizeof(int16_t));
+        layout_convert_col((const int16_t *)data, dst, R, C, B);
+        memcpy(t->data, dst.data(), data_size);
+        return 0;
+    }
+
+};
+
 template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PARAM_TYPE> class tensor_traits : public tensor_traits_base {
 
     bool work_size(int /* n_threads */, const struct ggml_tensor * op, size_t & size) override {
@@ -3389,6 +3533,16 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
 
 }  // namespace ggml::cpu::repack
 
+static bool is_weight(const struct ggml_tensor * t) {
+    const char * str = ggml_get_name(t);
+    const char * suffix = "token_embd.weight";
+
+    size_t str_len = strlen(str);
+    size_t suffix_len = strlen(suffix);
+    return str_len >= suffix_len &&
+           strcmp(str + str_len - suffix_len, suffix) != 0;
+}
+
 static const ggml::cpu::tensor_traits * ggml_repack_get_optimal_repack_type(const struct ggml_tensor * cur) {
     // instance for Q4
     static const ggml::cpu::repack::tensor_traits<block_q4_0, 4, 4, GGML_TYPE_Q8_0> q4_0_4x4_q8_0;
@@ -3421,6 +3575,8 @@ static const ggml::cpu::tensor_traits * ggml_repack_get_optimal_repack_type(cons
     // instance for Q8_0
     static const ggml::cpu::repack::tensor_traits<block_q8_0, 4, 4, GGML_TYPE_Q8_0> q8_0_4x4_q8_0;
     static const ggml::cpu::repack::tensor_traits<block_q8_0, 8, 4, GGML_TYPE_Q8_0> q8_0_4x8_q8_0;
+
+    static const ggml::cpu::repack::pacc_ext_tensor_traits pacc_tensor_traits;
 
     if (cur->type == GGML_TYPE_Q4_0) {
         if (ggml_cpu_has_avx2() || (ggml_cpu_has_sve() && ggml_cpu_has_matmul_int8() && ggml_cpu_get_sve_cnt() == QK8_0)
@@ -3515,6 +3671,10 @@ static const ggml::cpu::tensor_traits * ggml_repack_get_optimal_repack_type(cons
             if (cur->ne[1] % 4 == 0) {
                 return &q8_0_4x4_q8_0;
             }
+        }
+    } else if (cur->type == GGML_TYPE_F16 || cur->type == GGML_TYPE_BF16) {
+        if (is_weight(cur)) {
+            return &pacc_tensor_traits;
         }
     }
 
