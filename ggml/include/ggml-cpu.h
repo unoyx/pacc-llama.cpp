@@ -147,10 +147,10 @@ extern "C" {
     GGML_BACKEND_API void ggml_cpu_bf16_to_fp32(const ggml_bf16_t *, float *, int64_t);
 
 #ifdef GGML_USE_PACC_V0
-    static const int PACC_FD_COUNT = 3 * 4;
+    #define PACC_FD_COUNT 12
     struct PACC_fd {
         int count;
-        int pacc_device_fds[];
+        int pacc_device_fds[PACC_FD_COUNT];
     };
     GGML_BACKEND_API void pacc_v0_init(int count);
     GGML_BACKEND_API void pacc_v0_unit(void);

@@ -720,22 +720,15 @@ void pacc_v0_init(int count) {
         return;
     }
 
-    pacc_fd.pacc_device_fds[0] = 999;
-    pacc_fd.count = 1;
-    /*
     pacc_error_t err = pacc_device_open(count, pacc_fd.pacc_device_fds);
     pacc_fd.count = count;
     if (err != paccSuccess) {
-        printf("");
+        printf("pacc_device_open faill: %d\n", err);
     }
-    */
 }
 
 void pacc_v0_unit(void) {
-    /*
     pacc_device_close(pacc_fd.count, pacc_fd.pacc_device_fds);
-    */
-
     pacc_fd.count = 0;
 }
 

@@ -161,7 +161,7 @@ static void show_matmul_tensor_fp32(int64_t m, int64_t n, int64_t k,
 static void test_simple_matmul()
 {
     struct ggml_init_params params = {
-        /* .mem_size   = */ 128*1024*1024,
+        /* .mem_size   = */ ggml_tensor_overhead()*128 + ggml_graph_overhead(),
         /* .mem_buffer = */ NULL,
         /* .no_alloc   = */ false,
     };
