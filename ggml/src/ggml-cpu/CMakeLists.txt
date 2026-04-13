@@ -252,6 +252,14 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
             ggml-cpu/arch/x86/repack.cpp
             )
 
+        if (GGML_PACC_V0)
+            target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_USE_PACC_V0)
+            list(APPEND GGML_CPU_SOURCES
+                ggml-cpu/pacc_v0/pacc_v0.cpp
+                ggml-cpu/pacc_v0/pacc_v0.h
+            )
+        endif ()
+
         if (MSVC)
             # instruction set detection for MSVC only
             if (GGML_NATIVE)

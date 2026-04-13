@@ -22,6 +22,10 @@
 #    include "spacemit/ime.h"
 #endif
 
+#ifdef GGML_USE_PACC_V0
+#    include "pacc_v0/pacc_v0.h"
+#endif
+
 #if defined(_WIN32)
 #    define WIN32_LEAN_AND_MEAN
 #    ifndef NOMINMAX
@@ -46,6 +50,12 @@ std::vector<ggml_backend_buffer_type_t> & ggml_backend_cpu_get_extra_buffer_type
 #if defined(__AMX_INT8__) && defined(__AVX512VNNI__)
         if (ggml_backend_amx_buffer_type()) {
             bufts.push_back(ggml_backend_amx_buffer_type());
+        }
+#endif
+
+#ifdef GGML_USE_PACC_V0
+        if (ggml_backend_cpu_riscv64_pacc_v0_buffer_type()) {
+            bufts.push_back(ggml_backend_cpu_riscv64_pacc_v0_buffer_type());
         }
 #endif
 
@@ -697,5 +707,40 @@ ggml_backend_reg_t ggml_backend_cpu_reg(void) {
 
     return &ggml_backend_cpu_reg;
 }
+
+#if defined(GGML_USE_PACC_V0)
+
+static struct PACC_fd pacc_fd = {};
+
+void pacc_v0_init(int count) {
+    static bool is_first_call = true;
+
+    if (!is_first_call) {
+        return;
+    }
+
+    pacc_fd.pacc_device_fds[0] = 999;
+    pacc_fd.count = 1;
+    /*
+    pacc_error_t err = pacc_device_open(count, pacc_fd.pacc_device_fds);
+    pacc_fd.count = count;
+    if (err != paccSuccess) {
+        printf("");
+    }
+    */
+}
+
+void pacc_v0_unit(void) {
+    /*
+    pacc_device_close(pacc_fd.count, pacc_fd.pacc_device_fds);
+    */
+
+    pacc_fd.count = 0;
+}
+
+struct PACC_fd * pacc_v0_get_fds(void) {
+    return &pacc_fd;
+}
+#endif
 
 GGML_BACKEND_DL_IMPL(ggml_backend_cpu_reg)

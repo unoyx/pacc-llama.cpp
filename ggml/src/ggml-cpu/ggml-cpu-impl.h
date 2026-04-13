@@ -15,6 +15,7 @@
 extern "C" {
 #endif
 
+
 struct ggml_compute_params {
     // ith = thread index, nth = number of threads
     int ith, nth;
