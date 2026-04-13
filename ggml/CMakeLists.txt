@@ -176,7 +176,8 @@ option(GGML_RV_ZIHINTPAUSE   "ggml: enable riscv zihintpause "  ON)
 option(GGML_XTHEADVECTOR     "ggml: enable xtheadvector"     OFF)
 option(GGML_VXE              "ggml: enable vxe"              ${GGML_NATIVE})
 
-option(GGML_PACC_V0          "ggml: enable pacc_v0"          OFF)
+option(GGML_PACC_V0          "ggml: enable pacc_v0"                          OFF)
+option(PACC_RUNTIME_ROOT     "ggml: path to runtime path"                     "")
 
 option(GGML_CPU_ALL_VARIANTS "ggml: build all variants of the CPU backend (requires GGML_BACKEND_DL)" OFF)
 set(GGML_CPU_ARM_ARCH        "" CACHE STRING "ggml: CPU architecture for ARM")

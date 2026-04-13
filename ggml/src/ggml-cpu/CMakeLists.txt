@@ -252,14 +252,6 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
             ggml-cpu/arch/x86/repack.cpp
             )
 
-        if (GGML_PACC_V0)
-            target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_USE_PACC_V0)
-            list(APPEND GGML_CPU_SOURCES
-                ggml-cpu/pacc_v0/pacc_v0.cpp
-                ggml-cpu/pacc_v0/pacc_v0.h
-            )
-        endif ()
-
         if (MSVC)
             # instruction set detection for MSVC only
             if (GGML_NATIVE)
@@ -466,6 +458,16 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
                 ggml-cpu/spacemit/ime_kernels.h
             )
         endif()
+        if (GGML_PACC_V0)
+            target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_USE_PACC_V0)
+            target_link_directories(${GGML_CPU_NAME} PRIVATE ${PACC_RUNTIME_ROOT}/lib/)
+            target_include_directories(${GGML_CPU_NAME} PRIVATE ${PACC_RUNTIME_ROOT}/include/)
+            target_link_libraries(${GGML_CPU_NAME} PRIVATE libpacc_actual.a)
+            list(APPEND GGML_CPU_SOURCES
+                ggml-cpu/pacc_v0/pacc_v0.cpp
+                ggml-cpu/pacc_v0/pacc_v0.h
+            )
+        endif ()
         if(NOT GGML_CPU_ALL_VARIANTS)
             set(MARCH_STR "rv64gc")
             if (GGML_RV_ZFH)

@@ -1,0 +1,4 @@
+pacc支持编译方法参考riscv_pacc_cmd文件内容
+
+GGML_PACC_V0=ON 用来开启PACC的拓展支持
+PACC_RUNTIME_ROOT=/path/to/pacc_runtime 配置指向runtime的位置

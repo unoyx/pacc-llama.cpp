@@ -8,6 +8,8 @@
 #include "ggml-cpu.h"
 #include "traits.h"
 
+#include "pacc_matmul.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -92,28 +94,28 @@ class tensor_traits_common : public tensor_traits_base {
                             ne01,
                             ne11,
                             ne00/ggml_blck_size(src0->type),
-                            (const char *)src0->data + i12/r2*nb02 + i13/r3*nb03,
+                            (const uint16_t *)((const char *)src0->data + i12/r2*nb02 + i13/r3*nb03),
                             nb01/ggml_type_size(src0->type) * ggml_type_size(src0->type),
-                            (const char *)src1->data + i12*nb12 + i13*nb13,
+                            (const uint16_t *)((const char *)src1->data + i12*nb12 + i13*nb13),
                             nb11/ggml_type_size(src1->type) * ggml_type_size(src1->type),
-                            (char *)dst->data + i12*nb2 + i13*nb3,
+                            (float *)((char *)dst->data + i12*nb2 + i13*nb3),
                             nb1/ggml_type_size(dst->type) * ggml_type_size(src1->type),
                             0,
-                            pacc_fd->pacc_device_fds[0],
+                            pacc_fd->pacc_device_fds[0]
                            );
                     } else if (src1->type == GGML_TYPE_BF16) {
                         err = pacc_mul_mat_bf16(
                             ne01,
                             ne11,
                             ne00/ggml_blck_size(src0->type),
-                            (const char *)src0->data + i12/r2*nb02 + i13/r3*nb03,
+                            (const uint16_t *)((const char *)src0->data + i12/r2*nb02 + i13/r3*nb03),
                             nb01/ggml_type_size(src0->type) * ggml_type_size(src1->type),
-                            (const char *)src1->data + i12*nb12 + i13*nb13,
+                            (const uint16_t *)((const char *)src1->data + i12*nb12 + i13*nb13),
                             nb11/ggml_type_size(src1->type) * ggml_type_size(src1->type),
-                            (char *)dst->data + i12*nb2 + i13*nb3,
+                            (float *)((char *)dst->data + i12*nb2 + i13*nb3),
                             nb1/ggml_type_size(dst->type) * ggml_type_size(src1->type),
                             0,
-                            pacc_fd->pacc_device_fds[0],
+                            pacc_fd->pacc_device_fds[0]
                            );
                     }
 

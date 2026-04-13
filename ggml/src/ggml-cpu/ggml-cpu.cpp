@@ -24,6 +24,7 @@
 
 #ifdef GGML_USE_PACC_V0
 #    include "pacc_v0/pacc_v0.h"
+#    include "pacc_matmul.h"
 #endif
 
 #if defined(_WIN32)
