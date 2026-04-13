@@ -46,95 +46,74 @@
 
 // clang-format on
 
-
-namespace ggml::cpu::riscv64_pacc {
-
-class extra_buffer_type : ggml::cpu::extra_buffer_type {
-    bool supports_op(ggml_backend_dev_t, const struct ggml_tensor * op) override {
-#if 0        
-        switch (op->op) {
-            case GGML_OP_MUL_MAT:
-                if (op->src[0]->buffer && (ggml_n_dims(op->src[0]) == 2) &&
-                    op->src[0]->buffer->buft == ggml_backend_cpu_riscv64_spacemit_buffer_type() &&
-                    ggml_riscv64_spacemit_get_optimal_repack_type(op->src[0])) {
-                    if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
-                        return false;
-                    }
-                    if (op->src[1]->type == GGML_TYPE_F32) {
-                        return true;
-                    }
-                }
-                break;
-            case GGML_OP_NORM:
-            case GGML_OP_RMS_NORM:
-                if (op->src[0]->type == GGML_TYPE_F32) {
-                    return true;
-                }
-                break;
-            default:
-                // GGML_ABORT("fatal error");
-                break;
-        }
-#endif
-        return false;
+template <int K> constexpr int QK_0() {
+    if constexpr (K == 4) {
+        return QK4_0;
     }
-
-    ggml::cpu::tensor_traits * get_tensor_traits(const struct ggml_tensor * op) override {
-#if 0
-        switch (op->op) {
-            case GGML_OP_MUL_MAT:
-                if (op->src[0]->buffer && op->src[0]->buffer->buft == ggml_backend_cpu_riscv64_pacc_buffer_type()) {
-                    return (ggml::cpu::tensor_traits *) op->src[0]->extra;
-                }
-                break;
-            case GGML_OP_NORM:
-            case GGML_OP_RMS_NORM:
-                return (ggml::cpu::tensor_traits *) (&ggml::cpu::riscv64_pacc::rvv_impl);
-            default:
-                // GGML_ABORT("fatal error");
-                break;
-        }
-#endif
-        return nullptr;
+    if constexpr (K == 8) {
+        return QK8_0;
     }
+    return -1;
+}
+
+template <int K, int N> struct block {
+    ggml_half d[N];                         // deltas for N qK_0 blocks
+    uint8_t   qs[(QK_0<K>() * N * K) / 8];  // quants for N qK_0 blocks
 };
 
-}  // namespace ggml::cpu::riscv64_pacc
+static_assert(sizeof(block<8, 16>) == 16 * sizeof(ggml_half) + QK8_0 * 16, "wrong block<8,16> size/padding");
+
+using block_q8_0x16 = block<8, 16>;
+
+static block_q8_0x16 make_block_q8_0x16(block_q8_0 * in, unsigned int blck_size_interleave) {
+    block_q8_0x16 out;
+    GGML_ASSERT(QK8_0 / blck_size_interleave == 2);
+
+    for (int i = 0; i < 16; i++) {
+        out.d[i] = in[i].d;
+    }
+
+    for (int i = 0; i < 32; i++) {
+      for (int j = 0; j < 16; j++) {
+	out.qs[i*16+j] = in[j].qs[i];
+      }
+    }
+
+    return out;
+}
 
 
 static int repack_q8_0_to_q8_0_16_bl(struct ggml_tensor *       t,
                                      int                        interleave_block,
                                      const void * GGML_RESTRICT data,
                                      size_t                     data_size) {
-    GGML_ASSERT(t->type == GGML_TYPE_Q4_0);
+    GGML_ASSERT(t->type == GGML_TYPE_Q8_0);
     GGML_ASSERT(interleave_block == 16);
 
     constexpr int nrows_interleaved = 16;
 
-    return -1;
+    block_q8_0x16 *    dst = (block_q8_0x16 *) t->data;
+    const block_q8_0 * src = (const block_q8_0 *) data;
+    block_q8_0         dst_tmp[16];
+    int                nrow    = ggml_nrows(t);
+    int                nblocks = t->ne[0] / QK8_0;
 
-    // block_q4_0x16 *    dst = (block_q4_0x16 *) t->data;
-    // const block_q4_0 * src = (const block_q4_0 *) data;
-    // block_q4_0         dst_tmp[16];
-    // int                nrow    = ggml_nrows(t);
-    // int                nblocks = t->ne[0] / QK4_0;
+    GGML_ASSERT(data_size == nrow * nblocks * sizeof(block_q8_0));
 
-    // GGML_ASSERT(data_size == nrow * nblocks * sizeof(block_q4_0));
+    if (t->ne[1] % nrows_interleaved != 0 || t->ne[0] % QK8_0 != 0) {
+        return -1;
+    }
 
-    // if (t->ne[1] % nrows_interleaved != 0 || t->ne[0] % QK4_0 != 0) {
-    //     return -1;
-    // }
-
-    // for (int b = 0; b < nrow; b += nrows_interleaved) {
-    //     for (int64_t x = 0; x < nblocks; x++) {
-    //         for (int i = 0; i < nrows_interleaved; i++) {
-    //             dst_tmp[i] = src[x + i * nblocks];
-    //         }
-    //         *dst++ = make_block_q4_0x16(dst_tmp, interleave_block);
-    //     }
-    //     src += nrows_interleaved * nblocks;
-    // }
-    // return 0;
+    for (int b = 0; b < nrow; b += nrows_interleaved) {
+       for (int64_t x = 0; x < nblocks; x++) {
+           for (int i = 0; i < nrows_interleaved; i++) {
+               dst_tmp[i] = src[x + i * nblocks];
+           }
+           *dst++ = make_block_q8_0x16(dst_tmp, interleave_block);
+       }
+       src += nrows_interleaved * nblocks;
+    }
+    return 0;
 
     GGML_UNUSED(data_size);
 }
@@ -155,15 +134,15 @@ class tensor_traits_base : public ggml::cpu::tensor_traits {
 
 template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS> class tensor_traits : public tensor_traits_base {
     bool work_size(int /* n_threads */, const struct ggml_tensor * op, size_t & size) override {
-        // switch (op->op) {
-        //     case GGML_OP_MUL_MAT:
-        //         size = ggml_row_size(GGML_TYPE_Q8_0, ggml_nelements(op->src[1])) * 4;
-        //         size = ((size + QK4_0 - 1) / QK4_0) * (QK4_0 * sizeof(float) + sizeof(float));
-        //         return true;
-        //     default:
-        //         // GGML_ABORT("fatal error");
-        //         break;
-        // }
+        switch (op->op) {
+            case GGML_OP_MUL_MAT:
+                size = ggml_row_size(GGML_TYPE_Q8_0, ggml_nelements(op->src[1])) * 4;
+                size = ((size + QK8_0 - 1) / QK8_0) * (QK8_0 * sizeof(float) + sizeof(float));
+                return true;
+            default:
+                // GGML_ABORT("fatal error");
+                break;
+        }
         return false;
     }
 
@@ -269,10 +248,59 @@ static void ggml_backend_riscv64_pacc_buffer_set_tensor(ggml_backend_buffer_t bu
 }
 
 static const char * ggml_backend_cpu_riscv64_pacc_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
-    return "CPU_RISCV64_LANXIN";
+    return "CPU_RISCV64_PACC";
 
     GGML_UNUSED(buft);
 }
+
+namespace ggml::cpu::riscv64_pacc {
+
+class extra_buffer_type : ggml::cpu::extra_buffer_type {
+    bool supports_op(ggml_backend_dev_t, const struct ggml_tensor * op) override {
+        switch (op->op) {
+            case GGML_OP_MUL_MAT:
+                if (op->src[0]->buffer && (ggml_n_dims(op->src[0]) == 2) &&
+                    op->src[0]->buffer->buft == ggml_backend_cpu_riscv64_pacc_buffer_type() &&
+                    ggml_riscv64_pacc_get_optimal_repack_type(op->src[0])) {
+                    if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
+                        return false;
+                    }
+                    if (op->src[1]->type == GGML_TYPE_F32) {
+                        return true;
+                    }
+                }
+                break;
+            case GGML_OP_NORM:
+            case GGML_OP_RMS_NORM:
+            default:
+                // GGML_ABORT("fatal error");
+                break;
+        }
+        return false;
+    }
+
+    ggml::cpu::tensor_traits * get_tensor_traits(const struct ggml_tensor * op) override {
+
+        switch (op->op) {
+            case GGML_OP_MUL_MAT:
+                if (op->src[0]->buffer && op->src[0]->buffer->buft == ggml_backend_cpu_riscv64_pacc_buffer_type()) {
+                    return (ggml::cpu::tensor_traits *) op->src[0]->extra;
+                }
+                break;
+            case GGML_OP_NORM:
+            case GGML_OP_RMS_NORM:
+                //return (ggml::cpu::tensor_traits *) (&ggml::cpu::riscv64_pacc::rvv_impl);
+            default:
+                // GGML_ABORT("fatal error");
+                break;
+        }
+
+        return nullptr;
+    }
+};
+
+}  // namespace ggml::cpu::riscv64_pacc
+
 
 static ggml_backend_buffer_t ggml_backend_cpu_riscv64_pacc_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft,
                                                                                         size_t size) {

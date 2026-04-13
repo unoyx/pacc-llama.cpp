@@ -1168,7 +1168,8 @@ void quantize_a_row_i8(size_t BlkLen, const float * A, size_t CountK, std::byte 
 }  // namespace ime1
 
 namespace {
-#define SQ4BIT_KERNEL_COMP_1x8x2_4X8X4          \
+#define SQ4BIT_KERNEL_COMP_1x8x2_4X8X4
+#define AASQ4BIT_KERNEL_COMP_1x8x2_4X8X4          \
     "vmadot       v16, v14, v0            \n\t" \
     "vmadot       v18, v14, v1            \n\t" \
     "vmadot       v20, v14, v2            \n\t" \
@@ -1379,7 +1380,8 @@ namespace {
     "vmv.v.v      v29, v28                \n\t" \
     "vmv.v.v      v31, v30                \n\t"
 
-#define SQ4BIT_KERNEL_COMP_4x16x16              \
+#define SQ4BIT_KERNEL_COMP_4x16x16
+#define __SQ4BIT_KERNEL_COMP_4x16x16              \
     "vmadot       v16, v10, v2            \n\t" \
     "vmadot       v18, v10, v3            \n\t" \
     "vmadot       v20, v10, v4            \n\t" \
