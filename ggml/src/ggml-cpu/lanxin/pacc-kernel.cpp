@@ -48,7 +48,7 @@ static inline void micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv(int m_v, int n_
                 vfloat16m4_t vb2 = __riscv_vle16_v_f16m4(rhs_tile+2*vl, vl);
                 vfloat16m4_t vb3 = __riscv_vle16_v_f16m4(rhs_tile+3*vl, vl);
                 vc = __riscv_vfwmacc_vf_f32m8(vc, a0, vb0, vl);
-		                vc = __riscv_vfwmacc_vf_f32m8(vc, a1, vb1, vl);
+		vc = __riscv_vfwmacc_vf_f32m8(vc, a1, vb1, vl);
                 vc = __riscv_vfwmacc_vf_f32m8(vc, a2, vb2, vl);
                 vc = __riscv_vfwmacc_vf_f32m8(vc, a3, vb3, vl);
                 rhs_tile += 4*vl;
@@ -386,6 +386,7 @@ static inline void micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv(int m_v, int n_
     }
 }
 
+
 //A是激活
 //B是权重
 // [DK, 256]
@@ -485,30 +486,29 @@ static void ggml_compute_forward_mul_mat_one_chunk(
 
     //printf("ir0_start = %6lld, ir0_end = %6lld, ir1_start = %6lld, ir1_end = %6lld\n", ir0_start, ir0_end, ir1_start, ir1_end);
 
-    
+   const size_t row_size = ggml_row_size(vec_dot_type, ne10); 
     if (ir0_start >= ir0_end || ir1_start >= ir1_end) {
         return;
     }
 
-    const void * wdata = src1->data;
+    const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
 
     for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += block_m) {
-        const char * src0_row = (const char*)src0->data + (iir0 * ne00 * src0->nb[0]);                      //weight
-        const char * src1_col = (const char*)wdata + (iir1 * ne00 * src0->nb[0]);                           //activate
-        float * dst_col = (float*)((char*)dst->data + (iir0 * sizeof(float)));                              //result
+        const char * src0_row = (const char*)src0->data + (ir0_start * src0->nb[1]);                             //weight
+        const char * src1_col = (const char*)wdata + (iir1 * row_size);                                     //activate
+        float * dst_col = (float*)((char*)dst->data + (ir0_start * sizeof(float)));                              //result
         size_t tile_k_v = ne00;
-        size_t tile_n_v = ir0_end - iir0;
+        size_t tile_n_v = ir0_end - ir0_start;
         size_t tile_m_v = MIN(ir1_end-iir1, block_m);
         if(is_bf16_type){
             micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16*)src1_col, (__bf16*)src0_row, dst_col);
         } else if(is_fp16_type) {
             micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, (_Float16*)src1_col, (_Float16*)src0_row, dst_col);
         } else {
-            micro_kernel_q8_0_q8_0fp32_tile_k32_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v,  const block_q8_0 A, const int8_t* B, float* C);
+            micro_kernel_q8_0_q8_0fp32_tile_k32_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v,  (block_q8_0*) src1_col, (int8_t*)src0_row, dst_col);
         }
     }
 }
-
 
 template <int layout_block_n> void ggml_compute_forward_mul_mat(
         const struct ggml_compute_params * params,
