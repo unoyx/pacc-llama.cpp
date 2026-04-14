@@ -412,8 +412,8 @@ static inline void micro_kernel_q8_0_q8_0fp32_tile_k32_tile_n_gemv(int m_v, int 
             const int8_t     *rhs_tile = B + (j * k_stride) ;
 
             for (size_t block = 0; block < num_blocks; ++block) {
-                const int8_t   *w_base_q = rhs_tile + block * vl * sizeof(block_q8_0);
-                const _Float16 *w_base_s = (_Float16 *)(w_base_q + BLOCK_SIZE);
+                const _Float16 *w_base_s = (_Float16 *)(rhs_tile + block * vl * sizeof(block_q8_0));
+                const int8_t   *w_base_q = (int8_t   *)(w_base_s + vl);
                 const block_q8_0 *a_base = lhs_tile + block;
                 vint32m8_t vacc = __riscv_vmv_v_i_i32m8(0, vl);//8
                 for (size_t kk = 0; kk < BLOCK_SIZE; kk+=4) {
