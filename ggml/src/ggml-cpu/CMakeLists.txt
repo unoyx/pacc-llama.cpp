@@ -462,10 +462,17 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
             message(STATUS "PACC PERF enabled")
 	    target_compile_definitions(${GGML_CPU_NAME} PRIVATE PACC_PERF)
         endif()
+        if (GGML_CPU_RISCV64_LANXIN)
+            target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_USE_CPU_RISCV64_PACC)
+            list(APPEND GGML_CPU_SOURCES
+                ggml-cpu/lanxin/pacc.cpp
+            )
+        endif()
         if(NOT GGML_CPU_ALL_VARIANTS)
             set(MARCH_STR "rv64gc")
             if (GGML_RVV)
                 string(APPEND MARCH_STR "v")
+		string(APPEND MARCH_STR "_zba_zbb_zbc_zbs_zicond")
             endif()
 
             if (GGML_RV_ZFH)
