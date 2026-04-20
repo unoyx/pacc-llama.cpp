@@ -27,6 +27,10 @@
 #    include "pacc_matmul.h"
 #endif
 
+#ifdef GGML_USE_PACC_V1
+#    include "pacc_v1/pacc_v1.h"
+#endif
+
 #if defined(_WIN32)
 #    define WIN32_LEAN_AND_MEAN
 #    ifndef NOMINMAX
@@ -57,6 +61,12 @@ std::vector<ggml_backend_buffer_type_t> & ggml_backend_cpu_get_extra_buffer_type
 #ifdef GGML_USE_PACC_V0
         if (ggml_backend_cpu_riscv64_pacc_v0_buffer_type()) {
             bufts.push_back(ggml_backend_cpu_riscv64_pacc_v0_buffer_type());
+        }
+#endif
+
+#ifdef GGML_USE_PACC_V1
+        if (ggml_backend_cpu_riscv64_pacc_v1_buffer_type()) {
+            bufts.push_back(ggml_backend_cpu_riscv64_pacc_v1_buffer_type());
         }
 #endif
 

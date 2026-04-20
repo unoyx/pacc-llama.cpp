@@ -4,8 +4,11 @@ cmake \
 -DCMAKE_C_COMPILER=/home/heshan/src/riscv-toolchain-dir/riscv-gnu-toolchain/opt/riscv/bin/riscv64-unknown-linux-gnu-gcc \
 -DCMAKE_CXX_COMPILER=/home/heshan/src/riscv-toolchain-dir/riscv-gnu-toolchain/opt/riscv/bin/riscv64-unknown-linux-gnu-g++ \
 -DCMAKE_FIND_ROOT_PATH=/home/heshan/src/riscv-toolchain-dir/riscv-gnu-toolchain/opt/riscv/sysroot \
--DCMAKE_BUILD_TYPE=Debug \
+-DGGML_OPENMP=OFF \
+-DCMAKE_BUILD_TYPE=Release \
 -DLLAMA_BUILD_LIBRESSL=ON \
+-DGGML_STATIC=ON \
+-DBUILD_SHARED_LIBS=OFF \
 -DGGML_RVV=ON \
 -DGGML_RV_ZFH=ON \
 -DGGML_RV_ZVFBFWMA=ON \
@@ -17,3 +20,4 @@ cmake \
 -GNinja \
 -B riscv_pacc_build && cmake --build riscv_pacc_build
 
+# -DLLAMA_BUILD_TESTS=OFF \

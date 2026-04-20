@@ -1,14 +1,13 @@
 #define GGML_COMMON_IMPL_CPP
 #define GGML_COMMON_DECL_CPP
 
-#include "pacc_v0.h"
+#include "pacc_v1.h"
 
+#include "vec.h"
 #include "ggml-backend-impl.h"
 #include "ggml-common.h"
 #include "ggml-cpu.h"
 #include "traits.h"
-
-#include "pacc_matmul.h"
 
 #include <algorithm>
 #include <cassert>
@@ -18,7 +17,6 @@
 #include <thread>
 
 #include <utility>
-#include <riscv_vector.h>
 
 #if defined(__GNUC__)
 // #pragma GCC diagnostic ignored "-Woverlength-strings"
@@ -28,11 +26,11 @@
 
 // clang-format on
 
-namespace ggml::cpu::riscv64_pacc_v0 {
+namespace ggml::cpu::riscv64_pacc_v1 {
 
-}  // namespace ggml::cpu::riscv64_pacc_v0
+}  // namespace ggml::cpu::riscv64_pacc_v1
 
-namespace ggml::cpu::riscv64_pacc_v0 {
+namespace ggml::cpu::riscv64_pacc_v1 {
 
 class tensor_traits_base : public ggml::cpu::tensor_traits {
   public:
@@ -65,13 +63,13 @@ struct tensor_traits_common : public tensor_traits_base {
     bool is_remote(struct ggml_tensor * t) {
         auto weight = t->src[0];
         if (weight && weight->extra) {
-            auto tensor_info = (ggml::cpu::riscv64_pacc_v0::tensor_traits_common *)weight->extra;
+            auto tensor_info = (ggml::cpu::riscv64_pacc_v1::tensor_traits_common *)weight->extra;
             return tensor_info->t == Remote;
         }
         return false;
     }
 
-    void pacc_v0_compute_forward_mul_mat_remote(
+    void pacc_v1_compute_forward_mul_mat_remote(
         const struct ggml_compute_params * params,
         struct ggml_tensor * dst) {
         const struct ggml_tensor * src0 = dst->src[0];
@@ -86,9 +84,7 @@ struct tensor_traits_common : public tensor_traits_base {
         const int64_t r3 = ne13 / ne03;
 
         const bool src1_cont = ggml_is_contiguous(src1);
-        pacc_error_t err;
 
-        struct PACC_fd * pacc_fd = pacc_v0_get_fds();
         if (src1_cont) {
 
             int n = ggml_nelements(src1);
@@ -104,10 +100,10 @@ struct tensor_traits_common : public tensor_traits_base {
                 for (int64_t i12 = 0; i12 < ne12; i12++) {
                     LaunchKernelType t = LOCAL_TEST_BF16;
 
-                    auto tensor_info = (ggml::cpu::riscv64_pacc_v0::tensor_traits_common *)src0->extra;
+                    auto tensor_info = (ggml::cpu::riscv64_pacc_v1::tensor_traits_common *)src0->extra;
                     const int slice_count = tensor_info->ptrs.size();
 
-                    float * dst_part = (float *)malloc(sizeof(*dst_part) * nb1 * ne1 / slice_count);
+                    float * dst_part = new float[nb1 * ne1 / slice_count];
 
                     for (int i = 0; i < slice_count; ++i) {
 
@@ -133,17 +129,18 @@ struct tensor_traits_common : public tensor_traits_base {
                             /* B */ (const uint16_t *)((const char *)work_data + i12*nb12 + i13*nb13),
                             /* ldb */ nb11,
                             /* C */ dst_part,
-                            /* ldc */ nb1,
-                            pacc_fd->pacc_device_fds[0],
+                            /* ldc */ nb1 / slice_count,
+                            0,
                             t
                         );
 
+                        /* i is slice num. */
                         for (int j = 0; j < ne1; ++j) {
                             memcpy((char *)dst->data + i12*nb2 * i13*nb3 + i * (nb1 / slice_count) + j * nb1, dst_part, nb1 / slice_count);
                         }
                     }
 
-                    free(dst_part);
+                    delete[] dst_part;
 
                 }
             }
@@ -156,19 +153,18 @@ struct tensor_traits_common : public tensor_traits_base {
 
 
     bool compute_forward(struct ggml_compute_params * params, struct ggml_tensor * op) override {
-        struct PACC_fd * pacc_fd = pacc_v0_get_fds();
         switch (op->op) {
             case GGML_OP_MUL_MAT:
 
                 if (is_remote(op)) {
-                    pacc_v0_compute_forward_mul_mat_remote(params, op);
+                    pacc_v1_compute_forward_mul_mat_remote(params, op);
                     return true;
                 }
 
                 if (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_BF16) {
-                    if (params->ith < pacc_fd->count) {
+                    if (params->ith < 1) {
                         /// printf("ith: %d, pacc_fd: %d\n", params->ith, pacc_fd->pacc_device_fds[params->ith]);
-                        pacc_v0_compute_forward_mul_mat(params, op);
+                        pacc_v1_compute_forward_mul_mat(params, op);
                     }
                 }
                 return false;
@@ -187,56 +183,10 @@ struct tensor_traits_common : public tensor_traits_base {
         PACC_BF16,
     };
 
-    static void my_vec_dot_f16(int n, float * __restrict__ s, const uint16_t * __restrict__ x, const uint16_t * __restrict__ y) {
-        float sumf = 0.0;
-
-        int vl = __riscv_vsetvlmax_e32m2();
-        vfloat32m1_t vs = __riscv_vfmv_v_f_f32m1(0.0f, 1);
-        vfloat32m2_t vsum;
-        vfloat16m1_t ax;
-        vfloat16m1_t ay;
-        vsum = __riscv_vreinterpret_v_u32m2_f32m2(__riscv_vmv_v_x_u32m2(0, vl));
-        for (int i = 0; i < n; i += vl) {
-            vl = __riscv_vsetvl_e16m1(n - i);
-            ax = __riscv_vle16_v_f16m1_tu(ax, (const _Float16 *)&x[i], vl);
-            ay = __riscv_vle16_v_f16m1_tu(ay, (const _Float16 *)&y[i], vl);
-            vsum = __riscv_vfwmacc_vv_f32m2_tu(vsum, ax, ay, vl);
-        }
-        vl = __riscv_vsetvlmax_e32m1();
-        vfloat32m1_t ac0 = __riscv_vfadd_vv_f32m1(__riscv_vget_v_f32m2_f32m1(vsum, 0), __riscv_vget_v_f32m2_f32m1(vsum, 1), vl);
-        vs = __riscv_vfredusum_vs_f32m1_f32m1(ac0, vs, vl);
-        sumf += __riscv_vfmv_f_s_f32m1_f32(vs);
-
-        *s = sumf;
-    }
-
-    static void my_vec_dot_bf16(int n, float * __restrict__ s, const uint16_t * __restrict__ x, const uint16_t * __restrict__ y) {
-        float sumf = 0.0;
-
-        int vl = __riscv_vsetvlmax_e32m2();
-        vfloat32m1_t vs = __riscv_vfmv_v_f_f32m1(0.0f, 1);
-        vfloat32m2_t vsum;
-        vbfloat16m1_t ax;
-        vbfloat16m1_t ay;
-        vsum = __riscv_vreinterpret_v_u32m2_f32m2(__riscv_vmv_v_x_u32m2(0, vl));
-        for (int i = 0; i < n; i += vl) {
-            vl = __riscv_vsetvl_e16m1(n - i);
-            ax = __riscv_vle16_v_bf16m1_tu(ax, (const __bf16 *)&x[i], vl);
-            ay = __riscv_vle16_v_bf16m1_tu(ay, (const __bf16 *)&y[i], vl);
-            vsum = __riscv_vfwmaccbf16_vv_f32m2_tu(vsum, ax, ay, vl);
-        }
-        vl = __riscv_vsetvlmax_e32m1();
-        vfloat32m1_t ac0 = __riscv_vfadd_vv_f32m1(__riscv_vget_v_f32m2_f32m1(vsum, 0), __riscv_vget_v_f32m2_f32m1(vsum, 1), vl);
-        vs = __riscv_vfredusum_vs_f32m1_f32m1(ac0, vs, vl);
-        sumf += __riscv_vfmv_f_s_f32m1_f32(vs);
-
-        *s = sumf;
-    }
-
     void localKernelFP16(int m, int n, int k, const uint16_t *A, int lda, const uint16_t *B, int ldb, float *C, int ldc) {
         for (int mm = 0; mm < m; ++mm) {
             for (int nn = 0; nn < n; ++nn) {
-                my_vec_dot_f16(k, &C[mm + nn * m], &A[mm * k], &B[nn * k]);
+                ggml_vec_dot_f16(k, &C[mm + nn * m], 0, (ggml_fp16_t *)&A[mm * k], 0, (ggml_fp16_t *)&B[nn * k], 0, 1);
             }
         }
     }
@@ -244,7 +194,7 @@ struct tensor_traits_common : public tensor_traits_base {
     void localKernelBF16(int m, int n, int k, const uint16_t *A, int lda, const uint16_t *B, int ldb, float *C, int ldc) {
         for (int mm = 0; mm < m; ++mm) {
             for (int nn = 0; nn < n; ++nn) {
-                my_vec_dot_bf16(k, &C[mm + nn * m], &A[mm * k], &B[nn * k]);
+                ggml_vec_dot_bf16(k, &C[mm + nn * m], 0, (ggml_bf16_t *)&A[mm * k], 0, (ggml_bf16_t *)&B[nn * k], 0, 1);
             }
         }
     }
@@ -257,35 +207,11 @@ struct tensor_traits_common : public tensor_traits_base {
                 localKernelBF16(m, n, k, A, lda, B, ldb, C, ldc);
             }
         } else if (t == PACC_FP16 || t == PACC_BF16) {
-            std::pair<void*, create_bo> bufA;
-            int bufA_size = m * lda;
-            share_memory_alloc(&bufA.first, bufA_size, pacc_fd, &bufA.second);
-            std::pair<void*, create_bo> bufB;
-            int bufB_size = n * ldb;
-            share_memory_alloc(&bufB.first, bufB_size, pacc_fd, &bufB.second);
-            std::pair<void*, create_bo> bufC;
-            int bufC_size = m * ldc;
-            share_memory_alloc(&bufC.first, bufC_size, pacc_fd, &bufC.second);
-
-            memcpy(bufA.first, A, bufA_size);
-            memcpy(bufB.first, B, bufB_size);
-
-            pacc_error_t err;
-            if (t == PACC_FP16) {
-                err = pacc_mul_mat_f16(m, n, k, (const uint16_t *)bufA.first, lda, (const uint16_t *)bufB.first, ldb, (float *)bufC.first, ldc, pacc_fd, &bufA.second, &bufB.second, &bufC.second);
-            } else if (t == PACC_BF16) {
-                err = pacc_mul_mat_bf16(m, n, k, (const uint16_t *)bufA.first, lda, (const uint16_t *)bufB.first, ldb, (float *)bufC.first, ldc, pacc_fd, &bufA.second, &bufB.second, &bufC.second);
-            }
-
-            if (err != paccSuccess) {
-                GGML_ABORT("call pacc function with error: %d. ", err);
-            }
-
-            memcpy(C, bufC.first, bufC_size);
+            GGML_ABORT("unreachable branch.\n");
         }
     }
 
-    void pacc_v0_compute_forward_mul_mat(
+    void pacc_v1_compute_forward_mul_mat(
         const struct ggml_compute_params * params,
         struct ggml_tensor * dst) {
         const struct ggml_tensor * src0 = dst->src[0];
@@ -300,18 +226,15 @@ struct tensor_traits_common : public tensor_traits_base {
         const int64_t r3 = ne13 / ne03;
 
         const bool src1_cont = ggml_is_contiguous(src1);
-        pacc_error_t err;
 
-        struct PACC_fd * pacc_fd = pacc_v0_get_fds();
         if (src1_cont) {
 
             int n = ggml_nelements(src1);
             void * work_data = nullptr;
+            work_data = malloc(sizeof(uint16_t) * n);
             if (src0->type == GGML_TYPE_F16) {
-                work_data = new ggml_fp16_t[n];
                 ggml_fp32_to_fp16_row((float *)src1->data, (ggml_fp16_t *)work_data, n);
             } if (src0->type == GGML_TYPE_BF16) {
-                work_data = new ggml_bf16_t[n];
                 ggml_fp32_to_bf16_row((float *)src1->data, (ggml_bf16_t *)work_data, n);
             }
 
@@ -339,13 +262,13 @@ struct tensor_traits_common : public tensor_traits_base {
                         nb11/ggml_type_size(src1->type) * ggml_type_size(src1->type),
                         (float *)((char *)dst->data + i12*nb2 + i13*nb3),
                         nb1/ggml_type_size(dst->type) * ggml_type_size(src1->type),
-                        pacc_fd->pacc_device_fds[0],
+                        0,
                         t
                     );
                 }
             }
 
-            delete[] work_data;
+            free(work_data);
         }
 
         ggml_barrier(params->threadpool);
@@ -362,11 +285,11 @@ static const tensor_traits_common rvv_impl;
 
 }  // namespace ggml::cpu::riscv64_spacemit
 
-static ggml::cpu::riscv64_pacc_v0::tensor_traits_common * ggml_riscv64_pacc_v0_get_optimal_repack_type(const struct ggml_tensor * cur) {
+static ggml::cpu::riscv64_pacc_v1::tensor_traits_common * ggml_riscv64_pacc_v1_get_optimal_repack_type(const struct ggml_tensor * cur) {
     if (cur->type == GGML_TYPE_F16 || cur->type == GGML_TYPE_BF16) {
         // TODO add my traits
-        // return &ggml::cpu::riscv64_pacc_v0::rvv_impl;
-        return new ggml::cpu::riscv64_pacc_v0::tensor_traits_common;
+        // return &ggml::cpu::riscv64_pacc_v1::rvv_impl;
+        return new ggml::cpu::riscv64_pacc_v1::tensor_traits_common;
     }
 
     return nullptr;
@@ -384,13 +307,13 @@ static bool is_slice_tensor(const char * name)
 }
 static const int slice_num = 4;
 
-static enum ggml_status ggml_backend_riscv64_pacc_v0_buffer_init_tensor(ggml_backend_buffer_t buffer,
+static enum ggml_status ggml_backend_riscv64_pacc_v1_buffer_init_tensor(ggml_backend_buffer_t buffer,
                                                                          struct ggml_tensor *  tensor) {
-    auto * traits = const_cast<ggml::cpu::riscv64_pacc_v0::tensor_traits_common *>(ggml_riscv64_pacc_v0_get_optimal_repack_type(tensor));
+    auto * traits = const_cast<ggml::cpu::riscv64_pacc_v1::tensor_traits_common *>(ggml_riscv64_pacc_v1_get_optimal_repack_type(tensor));
     if (is_slice_tensor(ggml_get_name(tensor)) && ((ggml_nbytes(tensor) % 4) == 0)) {
-        traits->t = ggml::cpu::riscv64_pacc_v0::Remote;
+        traits->t = ggml::cpu::riscv64_pacc_v1::Remote;
     } else {
-        traits->t = ggml::cpu::riscv64_pacc_v0::Local;
+        traits->t = ggml::cpu::riscv64_pacc_v1::Local;
     }
     tensor->extra = traits;
 
@@ -399,7 +322,7 @@ static enum ggml_status ggml_backend_riscv64_pacc_v0_buffer_init_tensor(ggml_bac
     return GGML_STATUS_SUCCESS;
 }
 
-static void ggml_backend_riscv64_pacc_v0_buffer_set_tensor(ggml_backend_buffer_t buffer,
+static void ggml_backend_riscv64_pacc_v1_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                                             struct ggml_tensor *  tensor,
                                                             const void *          data,
                                                             size_t                offset,
@@ -407,14 +330,14 @@ static void ggml_backend_riscv64_pacc_v0_buffer_set_tensor(ggml_backend_buffer_t
     GGML_ASSERT(offset == 0);
     GGML_ASSERT(size == ggml_nbytes(tensor));
 
-    auto * tensor_info = (ggml::cpu::riscv64_pacc_v0::tensor_traits_common *) tensor->extra;
-    // if (tensor_info && tensor_info->t == ggml::cpu::riscv64_pacc_v0::Local) {
-    if (tensor_info) {
+    auto * tensor_info = (ggml::cpu::riscv64_pacc_v1::tensor_traits_common *) tensor->extra;
+    if (tensor_info && tensor_info->t == ggml::cpu::riscv64_pacc_v1::Local) {
+    // if (tensor_info) {
         auto OK = tensor_info->repack(tensor, data, size);
         GGML_ASSERT(OK == 0);
     }
 
-    if (tensor_info && tensor_info->t == ggml::cpu::riscv64_pacc_v0::Remote) {
+    if (tensor_info && tensor_info->t == ggml::cpu::riscv64_pacc_v1::Remote) {
         const int chunk_size = size / slice_num;
         assert((size % slice_num) == 0);
 
@@ -428,13 +351,13 @@ static void ggml_backend_riscv64_pacc_v0_buffer_set_tensor(ggml_backend_buffer_t
     GGML_UNUSED(buffer);
 }
 
-static const char * ggml_backend_cpu_riscv64_pacc_v0_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
-    return "CPU_RISCV64_PACC_V0";
+static const char * ggml_backend_cpu_riscv64_pacc_v1_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
+    return "CPU_RISCV64_pacc_v1";
 
     GGML_UNUSED(buft);
 }
 
-static ggml_backend_buffer_t ggml_backend_cpu_riscv64_pacc_v0_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft,
+static ggml_backend_buffer_t ggml_backend_cpu_riscv64_pacc_v1_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft,
                                                                                         size_t size) {
     ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(ggml_backend_cpu_buffer_type(), size);
 
@@ -443,20 +366,20 @@ static ggml_backend_buffer_t ggml_backend_cpu_riscv64_pacc_v0_buffer_type_alloc_
     }
 
     buffer->buft              = buft;
-    buffer->iface.init_tensor = ggml_backend_riscv64_pacc_v0_buffer_init_tensor;
-    buffer->iface.set_tensor  = ggml_backend_riscv64_pacc_v0_buffer_set_tensor;
+    buffer->iface.init_tensor = ggml_backend_riscv64_pacc_v1_buffer_init_tensor;
+    buffer->iface.set_tensor  = ggml_backend_riscv64_pacc_v1_buffer_set_tensor;
     buffer->iface.get_tensor  = nullptr;
     buffer->iface.cpy_tensor  = nullptr;
     return buffer;
 }
 
-static size_t ggml_backend_cpu_riscv64_pacc_v0_buffer_type_get_alignment(ggml_backend_buffer_type_t buft) {
+static size_t ggml_backend_cpu_riscv64_pacc_v1_buffer_type_get_alignment(ggml_backend_buffer_type_t buft) {
     return 64;
 
     GGML_UNUSED(buft);
 }
 
-static size_t ggml_backend_cpu_riscv64_pacc_v0_nbytes(ggml_backend_buffer_type_t buft,
+static size_t ggml_backend_cpu_riscv64_pacc_v1_nbytes(ggml_backend_buffer_type_t buft,
                                                        const struct ggml_tensor * tensor) {
     GGML_UNUSED(buft);
     for (int i = 0; i < GGML_MAX_DIMS; ++i) {
@@ -467,7 +390,7 @@ static size_t ggml_backend_cpu_riscv64_pacc_v0_nbytes(ggml_backend_buffer_type_t
     return  ggml_nbytes(tensor);
 }
 
-namespace ggml::cpu::riscv64_pacc_v0 {
+namespace ggml::cpu::riscv64_pacc_v1 {
 
 class extra_buffer_type : ggml::cpu::extra_buffer_type {
     bool supports_op(ggml_backend_dev_t, const struct ggml_tensor * op) override {
@@ -502,22 +425,22 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
 
 }  // namespace ggml::cpu::riscv64_paacc_v0
 
-ggml_backend_buffer_type_t ggml_backend_cpu_riscv64_pacc_v0_buffer_type(void) {
-    static struct ggml_backend_buffer_type ggml_backend_cpu_buffer_type_riscv64_pacc_v0 = {
+ggml_backend_buffer_type_t ggml_backend_cpu_riscv64_pacc_v1_buffer_type(void) {
+    static struct ggml_backend_buffer_type ggml_backend_cpu_buffer_type_riscv64_pacc_v1 = {
   /* .iface    = */
         {
-         /* .get_name         = */ ggml_backend_cpu_riscv64_pacc_v0_buffer_type_get_name,
-         /* .alloc_buffer     = */ ggml_backend_cpu_riscv64_pacc_v0_buffer_type_alloc_buffer,
-         /* .get_alignment    = */ ggml_backend_cpu_riscv64_pacc_v0_buffer_type_get_alignment,
+         /* .get_name         = */ ggml_backend_cpu_riscv64_pacc_v1_buffer_type_get_name,
+         /* .alloc_buffer     = */ ggml_backend_cpu_riscv64_pacc_v1_buffer_type_alloc_buffer,
+         /* .get_alignment    = */ ggml_backend_cpu_riscv64_pacc_v1_buffer_type_get_alignment,
          /* .get_max_size     = */ nullptr,
-         /* .get_alloc_size   = */ ggml_backend_cpu_riscv64_pacc_v0_nbytes,
+         /* .get_alloc_size   = */ ggml_backend_cpu_riscv64_pacc_v1_nbytes,
          /* .is_host          = */ nullptr,
          },
  /* .device  = */
         ggml_backend_reg_dev_get(ggml_backend_cpu_reg(), 0),
  /* .context = */
-        new ggml::cpu::riscv64_pacc_v0::extra_buffer_type(),
+        new ggml::cpu::riscv64_pacc_v1::extra_buffer_type(),
     };
 
-    return &ggml_backend_cpu_buffer_type_riscv64_pacc_v0;
+    return &ggml_backend_cpu_buffer_type_riscv64_pacc_v1;
 }

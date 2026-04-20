@@ -66,6 +66,10 @@ void mul_mat_test_fp16(int m, int k, int n)
     // 4. Run the computation
     int n_threads = 1; // Optional: number of threads to perform some operations with multi-threading
     ggml_graph_compute_with_ctx(ctx, gf, n_threads);
+    printf("A: %d, %d\n", tensor_a->ne[0], tensor_a->ne[1]);
+    printf("B: %d, %d\n", tensor_b->ne[0], tensor_b->ne[1]);
+    printf("result: %d, %d\n", result->ne[0], result->ne[1]);
+    return;
 
     // 5. Retrieve results (output tensors)
     float * result_data = (float *) result->data;
