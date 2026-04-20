@@ -182,16 +182,42 @@ static inline void micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv(int            
                                                                  float *          C) {
     const _Float16 * b_ptr = B;
 
-    size_t vl = __riscv_vsetvl_e32m8(MIN(n_v,layout_block_n));
+    size_t vl = __riscv_vsetvl_e32m8(MIN(n_v, layout_block_n));
 
     vfloat32m8_t sumf = __riscv_vfmv_v_f_f32m8(0.0f, vl);
-    
+
     for (int k = 0; k < k_v; k++) {
         _Float16 a0 = A[k + 0];
 
         vfloat16m4_t vb0 = __riscv_vle16_v_f16m4(b_ptr + 0, vl);
 
         sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a0, vb0, vl);
+
+        b_ptr += vl;
+    }
+
+    __riscv_vse32_v_f32m8(C, sumf, vl);
+}
+
+template <int layout_block_n>
+static inline void micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv(int            m_v,
+                                                                 int            n_v,
+                                                                 int            k_v,
+                                                                 const __bf16 * A,
+                                                                 const __bf16 * B,
+                                                                 float *        C) {
+    const __bf16 * b_ptr = B;
+
+    size_t vl = __riscv_vsetvl_e32m8(MIN(n_v, layout_block_n));
+
+    vfloat32m8_t sumf = __riscv_vfmv_v_f_f32m8(0.0f, vl);
+
+    for (int k = 0; k < k_v; k++) {
+        __bf16 a0 = A[k + 0];
+
+        vbfloat16m4_t vb0 = __riscv_vle16_v_bf16m4(b_ptr + 0, vl);
+
+        sumf = __riscv_vfwmaccbf16_vf_f32m8_tu(sumf, a0, vb0, vl);
 
         b_ptr += vl;
     }
@@ -250,14 +276,16 @@ static void ggml_compute_forward_mul_mat_one_chunk(const struct ggml_compute_par
         size_t  tile_k_v = ne00;
         size_t  tile_n_v = ir0_end - ir0_start;
         size_t  tile_m_v = MIN(ir1_end - iir1, block_m);
-        //if(is_bf16_type){
-        //    micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16*)src1_col, (__bf16*)src0_row, dst_col);
-        //} else if(is_fp16_type) {
-        micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
-                                                               (_Float16 *) src0_row, dst_col);
-        //} else {
-        //micro_kernel_q8_0_q8_0fp32_tile_k16_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, src1_col, src0_row, dst_col);
-        //}
+        if (is_bf16_type) {
+            micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
+                                                                   (__bf16 *) src0_row, dst_col);
+        } else if (is_fp16_type) {
+            micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
+                                                                   (_Float16 *) src0_row, dst_col);
+        } else {
+            micro_kernel_q8_0_q8_0fp32_tile_k16_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, src1_col, src0_row,
+                                                                     dst_col);
+        }
     }
 }
 
