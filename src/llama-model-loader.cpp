@@ -846,10 +846,18 @@ struct ggml_tensor * llama_model_loader::create_tensor(struct ggml_context * ctx
         return NULL;
     }
 
-    bool duplicated = flags & TENSOR_DUPLICATED;
+
+    bool duplicated = (flags & TENSOR_DUPLICATED) | (flags & TENSOR_COPY);
 
     struct ggml_tensor * tensor = ggml_dup_tensor(ctx, cur);
-    ggml_set_name(tensor, ggml_get_name(cur));
+    if((flags & TENSOR_COPY)){
+        std::string orig_name(ggml_get_name(cur));
+        std::string truncated = orig_name.substr(0, 11);
+        std::string new_name = truncated + "_output_copy_embd";
+        ggml_set_name(tensor, new_name.c_str()); 
+    } else {
+        ggml_set_name(tensor, ggml_get_name(cur));
+    }
 
     if (duplicated) {
         size_data += ggml_nbytes(cur);

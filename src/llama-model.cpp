@@ -2806,6 +2806,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         return it->second.get();
     };
 
+    const auto TENSOR_COPY         = llama_model_loader::TENSOR_COPY;
     const auto TENSOR_DUPLICATED   = llama_model_loader::TENSOR_DUPLICATED;
     const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
     const auto TENSOR_SKIP         = llama_model_loader::TENSOR_SKIP;
@@ -2852,7 +2853,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             // the tensor is duplicated
             // to handle this, we check if the tensor is duplicated, and if so, we assume that it is being loaded as the output tensor
             llm_tensor tn_tensor = tn.tensor;
-            if (tn.tensor == LLM_TENSOR_TOKEN_EMBD && flags & TENSOR_DUPLICATED) {
+            if (tn.tensor == LLM_TENSOR_TOKEN_EMBD && ((flags & TENSOR_DUPLICATED) | (flags & TENSOR_COPY))) {
                 tn_tensor = LLM_TENSOR_OUTPUT;
             }
 
@@ -7520,7 +7521,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
                     // if output is NULL, init from the input tok embed
                     if (output == NULL) {
-                        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, TENSOR_DUPLICATED);
+                        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, TENSOR_COPY);
                     }
 
                     // Calculate dimensions from hyperparameters
