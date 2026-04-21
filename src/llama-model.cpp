@@ -7454,7 +7454,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
                     // if output is NULL, init from the input tok embed
                     if (output == NULL) {
-                        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, TENSOR_DUPLICATED);
+                        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, TENSOR_COPY);
                     }
 
                     const int64_t n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used;
