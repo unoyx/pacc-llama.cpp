@@ -196,44 +196,44 @@ void ggml_vec_dot_bf16(int n, float * GGML_RESTRICT s, size_t bs, ggml_bf16_t * 
 
 #undef LOAD
 #elif defined(__riscv_v_intrinsic) && defined(__riscv_zvfbfwma)
-    size_t vl = __riscv_vsetvlmax_e32m4();
+    size_t vl = __riscv_vsetvlmax_e32m8();
 
     // initialize accumulators to all zeroes
-    vfloat32m4_t vsum0 = __riscv_vfmv_v_f_f32m4(0.0f, vl);
-    vfloat32m4_t vsum1 = __riscv_vfmv_v_f_f32m4(0.0f, vl);
+    vfloat32m8_t vsum0 = __riscv_vfmv_v_f_f32m8(0.0f, vl);
+    vfloat32m8_t vsum1 = __riscv_vfmv_v_f_f32m8(0.0f, vl);
 
     // calculate step size
-    const size_t epr = __riscv_vsetvlmax_e16m2();
+    const size_t epr = __riscv_vsetvlmax_e16m4();
     const size_t step = epr * 2;
     const int np = (n & ~(step - 1));
 
     // unroll by 2
     for (; i < np; i += step) {
-        vbfloat16m2_t ax0 = __riscv_vle16_v_bf16m2((const __bf16 *)&x[i], epr);
-        vbfloat16m2_t ay0 = __riscv_vle16_v_bf16m2((const __bf16 *)&y[i], epr);
-        vsum0 = __riscv_vfwmaccbf16_vv_f32m4(vsum0, ax0, ay0, epr);
+        vbfloat16m4_t ax0 = __riscv_vle16_v_bf16m4((const __bf16 *)&x[i], epr);
+        vbfloat16m4_t ay0 = __riscv_vle16_v_bf16m4((const __bf16 *)&y[i], epr);
+        vsum0 = __riscv_vfwmaccbf16_vv_f32m8(vsum0, ax0, ay0, epr);
         __asm__ __volatile__ ("" ::: "memory");
 
-        vbfloat16m2_t ax1 = __riscv_vle16_v_bf16m2((const __bf16 *)&x[i + epr], epr);
-        vbfloat16m2_t ay1 = __riscv_vle16_v_bf16m2((const __bf16 *)&y[i + epr], epr);
-        vsum1 = __riscv_vfwmaccbf16_vv_f32m4(vsum1, ax1, ay1, epr);
+        vbfloat16m4_t ax1 = __riscv_vle16_v_bf16m4((const __bf16 *)&x[i + epr], epr);
+        vbfloat16m4_t ay1 = __riscv_vle16_v_bf16m4((const __bf16 *)&y[i + epr], epr);
+        vsum1 = __riscv_vfwmaccbf16_vv_f32m8(vsum1, ax1, ay1, epr);
         __asm__ __volatile__ ("" ::: "memory");
     }
 
     // accumulate in 1 register
-    vsum0 = __riscv_vfadd_vv_f32m4(vsum0, vsum1, vl);
+    vsum0 = __riscv_vfadd_vv_f32m8(vsum0, vsum1, vl);
 
     // leftovers
     for (i = np; i < n; i += vl) {
-        vl = __riscv_vsetvl_e16m2(n - i);
-        vbfloat16m2_t ax0 = __riscv_vle16_v_bf16m2((const __bf16 *)&x[i], vl);
-        vbfloat16m2_t ay0 = __riscv_vle16_v_bf16m2((const __bf16 *)&y[i], vl);
-        vsum0 = __riscv_vfwmaccbf16_vv_f32m4(vsum0, ax0, ay0, vl);
+        vl = __riscv_vsetvl_e16m4(n - i);
+        vbfloat16m4_t ax0 = __riscv_vle16_v_bf16m4((const __bf16 *)&x[i], vl);
+        vbfloat16m4_t ay0 = __riscv_vle16_v_bf16m4((const __bf16 *)&y[i], vl);
+        vsum0 = __riscv_vfwmaccbf16_vv_f32m8(vsum0, ax0, ay0, vl);
     }
 
     // reduce
-    vl = __riscv_vsetvlmax_e32m4();
-    vfloat32m1_t redsum = __riscv_vfredusum_vs_f32m4_f32m1(vsum0, __riscv_vfmv_v_f_f32m1(0.0f, 1), vl);
+    vl = __riscv_vsetvlmax_e32m8();
+    vfloat32m1_t redsum = __riscv_vfredusum_vs_f32m8_f32m1(vsum0, __riscv_vfmv_v_f_f32m1(0.0f, 1), vl);
     sumf += __riscv_vfmv_f_s_f32m1_f32(redsum);
 
 #elif defined(__POWER9_VECTOR__) || defined(__VXE__) || defined(__VXE2__)
