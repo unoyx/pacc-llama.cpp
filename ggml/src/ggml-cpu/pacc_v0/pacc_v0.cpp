@@ -282,6 +282,10 @@ struct tensor_traits_common : public tensor_traits_base {
             }
 
             memcpy(C, bufC.first, bufC_size);
+
+            share_memory_free(&bufA.first, pacc_fd, &bufA.second);
+            share_memory_free(&bufB.first, pacc_fd, &bufB.second);
+            share_memory_free(&bufC.first, pacc_fd, &bufC.second);
         }
     }
 
@@ -419,6 +423,7 @@ static void ggml_backend_riscv64_pacc_v0_buffer_set_tensor(ggml_backend_buffer_t
         assert((size % slice_num) == 0);
 
         for (int i = 0; i < slice_num; ++i) {
+            // TODO shm alloc
             auto cur = new char[chunk_size];
             memcpy(cur, (char *)data + i * chunk_size, chunk_size);
             tensor_info->ptrs.push_back(cur);
