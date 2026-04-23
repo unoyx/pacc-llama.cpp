@@ -181,18 +181,37 @@ static inline void micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv(int            
                                                                  const _Float16 * B,
                                                                  float *          C) {
     const _Float16 * b_ptr = B;
+    int kk = 0;
 
     size_t vl = __riscv_vsetvl_e32m8(MIN(n_v, layout_block_n));
 
     vfloat32m8_t sumf = __riscv_vfmv_v_f_f32m8(0.0f, vl);
 
-    for (int k = 0; k < k_v; k++) {
-        _Float16 a0 = A[k + 0];
+    for (; kk + 3 < k_v; kk += 4) {
+        _Float16 a0 = A[kk + 0];
+        _Float16 a1 = A[kk + 1];
+        _Float16 a2 = A[kk + 2];
+        _Float16 a3 = A[kk + 3];
 
-        vfloat16m4_t vb0 = __riscv_vle16_v_f16m4(b_ptr + 0, vl);
+        vfloat16m4_t vb0 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        b_ptr += vl;
+        vfloat16m4_t vb1 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        b_ptr += vl;
+        vfloat16m4_t vb2 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        b_ptr += vl;
+        vfloat16m4_t vb3 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        b_ptr += vl;
 
         sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a0, vb0, vl);
+        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a1, vb1, vl);
+        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a2, vb2, vl);
+        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a3, vb3, vl);
+    }
 
+    for (; kk < k_v; ++kk) {
+        _Float16 a0 = A[kk];
+        vfloat16m4_t vb0 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a0, vb0, vl);
         b_ptr += vl;
     }
 
@@ -207,22 +226,41 @@ static inline void micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv(int            
                                                                  const __bf16 * B,
                                                                  float *        C) {
     const __bf16 * b_ptr = B;
+    int kk = 0;
 
     size_t vl = __riscv_vsetvl_e32m8(MIN(n_v, layout_block_n));
 
     vfloat32m8_t sumf = __riscv_vfmv_v_f_f32m8(0.0f, vl);
 
-    for (int k = 0; k < k_v; k++) {
-        __bf16 a0 = A[k + 0];
+    for (; kk + 3 < k_v; kk += 4) {
+        __bf16 a0 = A[kk + 0];
+        __bf16 a1 = A[kk + 1];
+        __bf16 a2 = A[kk + 2];
+        __bf16 a3 = A[kk + 3];
 
-        vbfloat16m4_t vb0 = __riscv_vle16_v_bf16m4(b_ptr + 0, vl);
+        vbfloat16m4_t vb0 = __riscv_vle16_v_bf16m4(b_ptr, vl);
+        b_ptr += vl;
+        vbfloat16m4_t vb1 = __riscv_vle16_v_bf16m4(b_ptr, vl);
+        b_ptr += vl;
+        vbfloat16m4_t vb2 = __riscv_vle16_v_bf16m4(b_ptr, vl);
+        b_ptr += vl;
+        vbfloat16m4_t vb3 = __riscv_vle16_v_bf16m4(b_ptr, vl);
+        b_ptr += vl;
 
         sumf = __riscv_vfwmaccbf16_vf_f32m8_tu(sumf, a0, vb0, vl);
+        sumf = __riscv_vfwmaccbf16_vf_f32m8_tu(sumf, a1, vb1, vl);
+        sumf = __riscv_vfwmaccbf16_vf_f32m8_tu(sumf, a2, vb2, vl);
+        sumf = __riscv_vfwmaccbf16_vf_f32m8_tu(sumf, a3, vb3, vl);
+    }
 
+    for (; kk < k_v; ++kk) {
+        __bf16 a0 = A[kk];
+        vbfloat16m4_t vb0 = __riscv_vle16_v_bf16m4(b_ptr, vl);
+        sumf = __riscv_vfwmaccbf16_vf_f32m8_tu(sumf, a0, vb0, vl);
         b_ptr += vl;
     }
 
-    __riscv_vse32_v_f32m8(C, sumf, vl);
+    __riscv_vse32_v_f32m8(C, sumf, vl);    
 }
 
 template <int layout_block_n>
