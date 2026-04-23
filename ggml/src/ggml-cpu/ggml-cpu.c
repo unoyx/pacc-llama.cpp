@@ -1689,7 +1689,8 @@ static void ggml_compute_forward_mul_mat_id(
 
 /////////////////////////////////
 
-#define PACC_PERF
+// Use cmake option to control the definition of this macro
+//#define PACC_PERF
 #if defined(PACC_PERF)
 #include "pacc_perf.h"
 #endif
