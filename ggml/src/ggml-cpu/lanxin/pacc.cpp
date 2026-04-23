@@ -638,7 +638,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
     bool compute_forward(struct ggml_compute_params * params, struct ggml_tensor * op) override {
         switch (op->op) {
             case GGML_OP_MUL_MAT:
-                if (op->src[0]->type == GGML_TYPE_F16) {
+                if (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_BF16) {
                     forward_mul_mat_f16(params, op);
                     return true;
                 }
