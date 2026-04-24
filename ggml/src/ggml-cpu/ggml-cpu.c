@@ -3218,7 +3218,7 @@ struct ggml_threadpool * ggml_threadpool_new(struct ggml_threadpool_params * tpp
 enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cplan * cplan) {
     ggml_cpu_init();
 #if defined(GGML_USE_PACC_V0)
-    pacc_v0_init(1);
+    pacc_v0_init(4);
 #endif
 
     GGML_ASSERT(cplan);

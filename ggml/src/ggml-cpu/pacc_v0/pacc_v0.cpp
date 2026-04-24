@@ -47,7 +47,7 @@ enum TensorType
 
 struct tensor_traits_common : public tensor_traits_base {
     TensorType t = Local;
-    std::vector<void*> ptrs;
+    std::vector<std::pair<void*, create_bo>> ptrs;
 
     bool work_size(int /* n_threads */, const struct ggml_tensor * op, size_t & size) override {
         switch (op->op) {
@@ -119,9 +119,9 @@ struct tensor_traits_common : public tensor_traits_base {
                             GGML_ABORT("unsupport datatype: %d. ", src0->type);
                         }
 
-                        t = LOCAL_TEST_BF16;
-
-                        const uint16_t * weight_parts = (const uint16_t *)((const char *)tensor_info->ptrs.at(i) + i12/r2*nb02 + i13/r3*nb03);
+                        // this should be shm memory
+                        auto * cur_shm = (const char *)tensor_info->ptrs.at(i).first;
+                        const uint16_t * weight_parts = (const uint16_t *)(cur_shm + i12/r2*nb02 + i13/r3*nb03);
                         const int weight_size = ne01 / slice_count;
 
                         pacc_mat_mul_wrapper(
@@ -129,6 +129,7 @@ struct tensor_traits_common : public tensor_traits_base {
                             /* n */ ne11,
                             /* k */ ne00,
                             /* A */ weight_parts,
+                            /* create_bo */ &tensor_info->ptrs.at(i).second,
                             /* lda */ nb01,
                             /* B */ (const uint16_t *)((const char *)work_data + i12*nb12 + i13*nb13),
                             /* ldb */ nb11,
@@ -165,6 +166,9 @@ struct tensor_traits_common : public tensor_traits_base {
                     return true;
                 }
 
+                return false;
+
+                /*
                 if (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_BF16) {
                     if (params->ith < pacc_fd->count) {
                         /// printf("ith: %d, pacc_fd: %d\n", params->ith, pacc_fd->pacc_device_fds[params->ith]);
@@ -172,6 +176,7 @@ struct tensor_traits_common : public tensor_traits_base {
                     }
                 }
                 return false;
+                */
                 break;
             default:
                 // GGML_ABORT("fatal error");
@@ -249,7 +254,7 @@ struct tensor_traits_common : public tensor_traits_base {
         }
     }
 
-    void pacc_mat_mul_wrapper(int m, int n, int k, const uint16_t *A, int lda, const uint16_t *B, int ldb, float *C, int ldc, int pacc_fd, enum LaunchKernelType t) {
+    void pacc_mat_mul_wrapper(int m, int n, int k, const uint16_t *A, create_bo *boA, int lda, const uint16_t *B, int ldb, float *C, int ldc, int pacc_fd, enum LaunchKernelType t) {
         if (t == LOCAL_TEST_FP16 || t == LOCAL_TEST_BF16) {
             if (t == LOCAL_TEST_FP16) {
                 localKernelFP16(m, n, k, A, lda, B, ldb, C, ldc);
@@ -257,9 +262,9 @@ struct tensor_traits_common : public tensor_traits_base {
                 localKernelBF16(m, n, k, A, lda, B, ldb, C, ldc);
             }
         } else if (t == PACC_FP16 || t == PACC_BF16) {
-            std::pair<void*, create_bo> bufA;
-            int bufA_size = m * lda;
-            share_memory_alloc(&bufA.first, bufA_size, pacc_fd, &bufA.second);
+            // std::pair<void*, create_bo> bufA;
+            // int bufA_size = m * lda;
+            // share_memory_alloc(&bufA.first, bufA_size, pacc_fd, &bufA.second);
             std::pair<void*, create_bo> bufB;
             int bufB_size = n * ldb;
             share_memory_alloc(&bufB.first, bufB_size, pacc_fd, &bufB.second);
@@ -267,14 +272,14 @@ struct tensor_traits_common : public tensor_traits_base {
             int bufC_size = m * ldc;
             share_memory_alloc(&bufC.first, bufC_size, pacc_fd, &bufC.second);
 
-            memcpy(bufA.first, A, bufA_size);
+            // memcpy(bufA.first, A, bufA_size);
             memcpy(bufB.first, B, bufB_size);
 
             pacc_error_t err;
             if (t == PACC_FP16) {
-                err = pacc_mul_mat_f16(m, n, k, (const uint16_t *)bufA.first, lda, (const uint16_t *)bufB.first, ldb, (float *)bufC.first, ldc, pacc_fd, &bufA.second, &bufB.second, &bufC.second);
+                err = pacc_mul_mat_f16(m, n, k, (const uint16_t *)A, lda, (const uint16_t *)bufB.first, ldb, (float *)bufC.first, ldc, pacc_fd, boA, &bufB.second, &bufC.second);
             } else if (t == PACC_BF16) {
-                err = pacc_mul_mat_bf16(m, n, k, (const uint16_t *)bufA.first, lda, (const uint16_t *)bufB.first, ldb, (float *)bufC.first, ldc, pacc_fd, &bufA.second, &bufB.second, &bufC.second);
+                err = pacc_mul_mat_bf16(m, n, k, (const uint16_t *)A, lda, (const uint16_t *)bufB.first, ldb, (float *)bufC.first, ldc, pacc_fd, boA, &bufB.second, &bufC.second);
             }
 
             if (err != paccSuccess) {
@@ -283,7 +288,7 @@ struct tensor_traits_common : public tensor_traits_base {
 
             memcpy(C, bufC.first, bufC_size);
 
-            share_memory_free(&bufA.first, pacc_fd, &bufA.second);
+            // share_memory_free(&bufA.first, pacc_fd, &bufA.second);
             share_memory_free(&bufB.first, pacc_fd, &bufB.second);
             share_memory_free(&bufC.first, pacc_fd, &bufC.second);
         }
@@ -324,20 +329,19 @@ struct tensor_traits_common : public tensor_traits_base {
                     LaunchKernelType t = LOCAL_TEST_FP16;
 
                     if (src0->type == GGML_TYPE_F16) {
-                        t = PACC_FP16;
+                        t = LOCAL_TEST_FP16;
                     } else if (src0->type == GGML_TYPE_BF16) {
-                        t = PACC_BF16;
+                        t = LOCAL_TEST_BF16;
                     } else {
                         GGML_ABORT("unsupport datatype: %d. ", src0->type);
                     }
-
-                    t = LOCAL_TEST_BF16;
 
                     pacc_mat_mul_wrapper(
                         ne01,
                         ne11,
                         ne00/ggml_blck_size(src0->type),
                         (const uint16_t *)((const char *)src0->data + i12/r2*nb02 + i13/r3*nb03),
+                        nullptr,
                         nb01/ggml_type_size(src0->type) * ggml_type_size(src0->type),
                         (const uint16_t *)((const char *)work_data + i12*nb12 + i13*nb13),
                         nb11/ggml_type_size(src1->type) * ggml_type_size(src1->type),
@@ -411,6 +415,10 @@ static void ggml_backend_riscv64_pacc_v0_buffer_set_tensor(ggml_backend_buffer_t
     GGML_ASSERT(offset == 0);
     GGML_ASSERT(size == ggml_nbytes(tensor));
 
+#if defined(GGML_USE_PACC_V0)
+    pacc_v0_init(4);
+#endif
+
     auto * tensor_info = (ggml::cpu::riscv64_pacc_v0::tensor_traits_common *) tensor->extra;
     // if (tensor_info && tensor_info->t == ggml::cpu::riscv64_pacc_v0::Local) {
     if (tensor_info) {
@@ -422,10 +430,13 @@ static void ggml_backend_riscv64_pacc_v0_buffer_set_tensor(ggml_backend_buffer_t
         const int chunk_size = size / slice_num;
         assert((size % slice_num) == 0);
 
+        struct PACC_fd * pacc_fd = pacc_v0_get_fds();
+
         for (int i = 0; i < slice_num; ++i) {
-            // TODO shm alloc
-            auto cur = new char[chunk_size];
-            memcpy(cur, (char *)data + i * chunk_size, chunk_size);
+            std::pair<void*, create_bo> cur;
+            share_memory_alloc(&cur.first, chunk_size, pacc_fd->pacc_device_fds[i], &cur.second);
+
+            memcpy(cur.first, (char *)data + i * chunk_size, chunk_size);
             tensor_info->ptrs.push_back(cur);
         }
     }
