@@ -691,17 +691,18 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
                 }
             case GGML_OP_MUL_MAT_ID:
                 {
-                    size = ggml_row_size(GGML_TYPE_F16, ggml_nelements(op->src[1]));
-                    size = GGML_PAD(size, sizeof(int64_t)); // + padding for next bloc.
+                    size = ggml_row_size(GGML_TYPE_F16, ggml_nelements(op->src[1])) + sizeof(int64_t);
 
-                    const int64_t ne02 = op->src[0]->ne[2];  // n_as, n_expert
+                    const int64_t n_as = op->src[0]->ne[2];  // n_as, n_expert
                     const int64_t ne12 = op->src[1]->ne[2];  // n_tokens
+		    const struct ggml_tensor * ids = op->src[2];
+                    // matrix_row_counts
+                    size += n_as * sizeof(int64_t) + sizeof(int64_t);							     
+		    // matrix_rows
+                    size += n_as*ids->ne[0]*ids->ne[1]*sizeof(struct mmid_row_mapping) + sizeof(int64_t);
 
-                    const size_t sizeof_mmid_row_mapping = sizeof(int64_t);
-
-                    size += sizeof_mmid_row_mapping * ne02 * (ne12 + 1);
-
-                    size += CACHE_LINE_SIZE * ne02; // for atomic_current_chunk which is (char (*)[64]) type for one expert
+		    // atomic_current_chunk
+                    size += CACHE_LINE_SIZE*n_as + CACHE_LINE_SIZE;
 
                     return true;
                 }
