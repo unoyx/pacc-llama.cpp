@@ -21,16 +21,17 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
-
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>  // for GGML_ASSERT
 #include <stdexcept>
 #include <thread>
+#include <atomic>
 #if defined(__gnu_linux__)
 #    include <syscall.h>
 #endif
+
 
 // clang-format off
 #if defined(__riscv)
@@ -602,6 +603,101 @@ template <typename T> void layout_convert_row(const T * src, std::vector<T> & ds
     }
 }
 
+
+#define CACHE_LINE_SIZE 64
+
+#define MMID_MATRIX_ROW(row_id, i1) matrix_rows[(row_id)*ids->ne[0]*ids->ne[1] + (i1)]
+
+struct mmid_row_mapping {
+	int32_t i1;
+	int32_t i2;
+};
+
+
+void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
+
+	void * ptr = *p;
+	ptr = (void *) GGML_PAD((uintptr_t) ptr, align);
+	*p = (void *) ((char *) ptr + size);
+	return ptr;
+}
+
+template <int layout_block_n>
+static void ggml_compute_forward_mul_mat_id_one_chunk(
+    struct ggml_tensor * dst,
+    const struct ggml_tensor * src0,
+    const struct ggml_tensor * src1,
+    const struct ggml_tensor * ids,
+    const int64_t cur_a,
+    const int64_t ir0_start,
+    const int64_t ir0_end,
+    const int64_t ir1_start,
+    const int64_t ir1_end,
+    const char * src0_cur,
+    const struct mmid_row_mapping * matrix_rows,
+    const size_t row_size,
+    const bool src1_cont,
+    const void * wdata) {
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+
+    const enum ggml_type type = src0->type;
+    ggml_vec_dot_t    const vec_dot      = ggml_get_type_traits_cpu(type)->vec_dot;
+    enum ggml_type const vec_dot_type    = ggml_get_type_traits_cpu(type)->vec_dot_type;
+
+    const int64_t _i12 = ir1_start;  // logical row index for this expert
+
+    struct mmid_row_mapping row_mapping = MMID_MATRIX_ROW(cur_a, _i12);
+    const int               id          = row_mapping.i1;  // selected expert index
+
+    const int64_t i11 = id % ne11;
+    const int64_t i12 = row_mapping.i2;  // row index in src1
+
+    const int64_t i1 = id;               // selected expert index
+    const int64_t i2 = i12;              // row
+
+    // desc: when src1 is not a contiguous memory block we have to calculate the offset using the strides
+    //       if it is, then we have either copied the data to params->wdata and made it contiguous or we are using
+    //       the original src1 data pointer, so we should index using the indices directly
+    // TODO: this is a bit of a hack, we should probably have a better way to handle this
+    const char * src1_col =
+        (const char *) wdata +
+        (src1_cont || src1->type != vec_dot_type ? (i11 + i12 * ne11) * row_size : (i11 * nb11 + i12 * nb12));
+
+    float * dst_col = (float *) ((char *) dst->data + (i1 * nb1 + i2 * nb2));
+
+    size_t tile_k_v = ne00;
+    size_t tile_n_v = ir0_end - ir0_start;
+    size_t tile_m_v = 1;
+
+    micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
+                                                                  (__bf16 *) (src0_cur + ir0_start * nb01),
+                                                                  &dst_col[ir0_start]);
+
+#if 0                
+		const _Float16 * A = (_Float16 *)src1_col;
+		const _Float16 * b_ptr = (_Float16 *)(src0_cur+ir0_start*nb01);
+
+
+                size_t vl = __riscv_vsetvl_e32m8(MIN(ir0_end-ir0_start, layout_block_n));
+
+                vfloat32m8_t sumf = __riscv_vfmv_v_f_f32m8(0.0f, vl);
+
+		for (int k = 0; k < ne00; k++) {
+			_Float16 a0 = A[k];
+
+                       vfloat16m4_t vb0 = __riscv_vle16_v_f16m4(b_ptr, vl);
+                        b_ptr += vl;
+     
+                        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a0, vb0, vl);
+		}
+               __riscv_vse32_v_f32m8(&dst_col[ir0_start], sumf, vl);
+#endif               
+
+}
+
+
+
 class pacc_ext_tensor_traits : public tensor_traits_base {
   public:
     // just direct copy from
@@ -642,11 +738,204 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
                     forward_mul_mat_f16(params, op);
                     return true;
                 }
+            case GGML_OP_MUL_MAT_ID:
+                if (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_BF16) {
+                    forward_mul_mat_id_f16(params, op);
+                    return true;
+                }
             default:
                 // GGML_ABORT("fatal error");
                 break;
         }
         return false;
+    }
+
+    void forward_mul_mat_id_f16(ggml_compute_params * params, ggml_tensor * op) {
+    const struct ggml_tensor * src0 = op->src[0];
+    const struct ggml_tensor * src1 = op->src[1];
+    const struct ggml_tensor * ids = op->src[2];
+        ggml_tensor *              dst  = op;
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const enum ggml_type type = src0->type;
+
+    const bool src1_cont = ggml_is_contiguous(src1);
+
+
+    enum ggml_type const vec_dot_type    = ggml_get_type_traits_cpu(src0->type)->vec_dot_type;
+    const ggml_from_float_t from_float   = ggml_get_type_traits_cpu(src0->type)->from_float;
+
+    // we don't support permuted src0 or src1
+    GGML_ASSERT(nb00 == ggml_type_size(type));
+    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
+
+    // dst cannot be transposed or permuted
+    GGML_ASSERT(nb0 == sizeof(float));
+    GGML_ASSERT(nb0 <= nb1);
+    GGML_ASSERT(nb1 <= nb2);
+    GGML_ASSERT(nb2 <= nb3);
+
+    // row groups
+    const int n_ids = ids->ne[0]; // n_expert_used
+    const int n_as  = ne02;       // n_expert
+
+    void * wdata_cur = (void*)params->wdata;
+
+    if (src1->type != vec_dot_type) {
+        incr_ptr_aligned(&wdata_cur, ggml_row_size(vec_dot_type, ggml_nelements(src1)), sizeof(int64_t));
+    }
+
+    int64_t * matrix_row_counts = // [n_as]
+        (int64_t *)incr_ptr_aligned(&wdata_cur, n_as*sizeof(int64_t), sizeof(int64_t));
+
+    struct mmid_row_mapping * matrix_rows = // [n_as][ids->ne[0]*ids->ne[1]]
+        (struct mmid_row_mapping *)incr_ptr_aligned(&wdata_cur, n_as*ids->ne[0]*ids->ne[1]*sizeof(struct mmid_row_mapping), sizeof(int64_t));
+
+    char (*atomic_current_chunk)[CACHE_LINE_SIZE] = // [n_as]
+        (char (*)[64])incr_ptr_aligned(&wdata_cur, CACHE_LINE_SIZE * n_as, CACHE_LINE_SIZE);
+
+    GGML_ASSERT(params->wsize >= (size_t)((char *) wdata_cur - (char *) params->wdata));
+
+    if (src1->type != vec_dot_type) {
+        char * wdata = (char *)params->wdata;
+
+        const size_t nbw0 = ggml_type_size(vec_dot_type);
+        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
+        const size_t nbw2 = nbw1*ne11;
+        const size_t nbw3 = nbw2*ne12;
+
+        assert(params->wsize >= ne13*nbw3);
+        GGML_ASSERT(src1->type == GGML_TYPE_F32);
+
+#if 0
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = ith; i12 < ne12; i12 += nth) {
+                for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
+                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
+                               ne10);
+                }
+            }
+        }
+#else
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = 0; i12 < ne12; ++i12) {
+                for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                    size_t bs = ggml_blck_size(vec_dot_type);
+                    int64_t ne10_block_start = (ith * ne10/bs) / nth;
+                    int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                               (ne10_block_end - ne10_block_start) * bs);
+                }
+            }
+        }
+#endif
+    }
+
+    if (ith == 0) {
+        // initialize matrix_row_counts
+        memset(matrix_row_counts, 0, n_as*sizeof(int64_t));
+
+        // group rows by src0 matrix
+        for (int64_t iid1 = 0; iid1 < ids->ne[1]; ++iid1) {
+            for (int id = 0; id < n_ids; ++id) {
+                const int32_t i02 = *(const int32_t *) ((const char *) ids->data + iid1*ids->nb[1] + id*ids->nb[0]);
+
+                assert(i02 >= 0 && i02 < n_as);
+
+                MMID_MATRIX_ROW(i02, matrix_row_counts[i02]) = (struct mmid_row_mapping) {id, (int32_t)iid1};
+                matrix_row_counts[i02] += 1;
+            }
+        }
+    }
+
+    // reset current_chunk
+    for (int cur_a = ith; cur_a < n_as; cur_a += nth) {
+        //atomic_int * current_chunk_ctr = (atomic_int *)(atomic_current_chunk + cur_a);
+        //*current_chunk_ctr = nth;
+
+        int *current_chunk_ctr = reinterpret_cast<int *>(atomic_current_chunk + cur_a);
+        __atomic_store_n(current_chunk_ctr, nth, __ATOMIC_RELAXED);
+    }
+
+    ggml_barrier(params->threadpool);
+
+    const int block_n = 256;
+
+    for (int cur_a = 0; cur_a < n_as; ++cur_a) {
+        const int64_t cne1 = matrix_row_counts[cur_a];
+
+        if (cne1 == 0) {
+            continue;
+        }
+    
+        const char * src0_cur = (const char *) src0->data + cur_a * nb02;
+        const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
+        const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+
+        const int64_t nr0 = ne01;
+        const int64_t nr1 = cne1;
+
+        int chunk_size = 16;
+        if (nr0 == 1 || nr1 == 1) {
+            chunk_size = 64;
+        }
+
+	chunk_size = block_n;
+	int chunk_size_n = block_n;
+	int chunk_size_m = 1;
+
+        // disable for NUMA
+        const bool disable_chunking = ggml_is_numa();
+
+        int64_t nchunk0 = (nr0 + chunk_size_n - 1) / chunk_size_n;
+        int64_t nchunk1 = (nr1 + chunk_size_m - 1) / chunk_size_m;
+
+        if (nchunk0 * nchunk1 < nth * 4 || disable_chunking) {
+            nchunk0 = nr0 > nr1 ? nth : 1;
+            nchunk1 = nr0 > nr1 ? 1 : nth;
+        }
+
+        //const int64_t dr0 = (nr0 + nchunk0 - 1) / nchunk0;
+        //const int64_t dr1 = (nr1 + nchunk1 - 1) / nchunk1;
+        const int64_t dr0 = chunk_size_n; 
+        const int64_t dr1 = chunk_size_m;
+
+        int current_chunk = ith;
+
+        //atomic_int * current_chunk_ctr = (atomic_int *)(atomic_current_chunk + cur_a);
+        int *current_chunk_ctr = reinterpret_cast<int *>(atomic_current_chunk + cur_a);
+
+        while (current_chunk < nchunk0 * nchunk1) {
+            const int64_t ith0 = current_chunk % nchunk0;
+            const int64_t ith1 = current_chunk / nchunk0;
+
+            const int64_t ir0_start = dr0 * ith0;
+            const int64_t ir0_end = MIN(ir0_start + dr0, nr0);
+
+            const int64_t ir1_start = dr1 * ith1;
+            const int64_t ir1_end = MIN(ir1_start + dr1, nr1);
+
+            ggml_compute_forward_mul_mat_id_one_chunk<block_n>(
+                dst, src0, src1, ids, cur_a,
+                ir0_start, ir0_end, ir1_start, ir1_end,
+                src0_cur, matrix_rows, row_size, src1_cont, wdata
+            );
+
+            if (nth >= nchunk0 * nchunk1) {
+                break;
+            }
+
+            //current_chunk = atomic_fetch_add_explicit(current_chunk_ctr, 1, memory_order_relaxed);
+            current_chunk = __atomic_fetch_add(current_chunk_ctr, 1, __ATOMIC_RELAXED);
+        }
+    }
+    
     }
 
     void forward_mul_mat_f16(ggml_compute_params * params, ggml_tensor * op) {
@@ -788,18 +1077,20 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
         int K = t->ne[0];
         int N = t->ne[1];
+        int T = t->ne[2];
 
         int16_t * dst_p = (int16_t *) t->data;
 
         const int block_n = 256;
 
+	for (int t = 0; t < T; t++) {
         for (int n = 0; n < N;) {
             int remaining = N - n;
 
             size_t vl = __riscv_vsetvl_e16m4(MIN(remaining,block_n));
 
             for (int k = 0; k < K; k++) {
-                const int16_t * p = (const int16_t *) (data) + (n * K + k);
+                const int16_t * p = (const int16_t *) (data) + (t*N*K + n * K + k);
                 vint16m4_t      v = __riscv_vlse16_v_i16m4(p, K * sizeof(int16_t), vl);
                 __riscv_vse16_v_i16m4(dst_p, v, vl);
                 dst_p += vl;
@@ -807,6 +1098,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
             n += vl;
         }
+	}
 
         return 0;
     }
@@ -887,6 +1179,18 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
                     }
                 }
                 break;
+            case GGML_OP_MUL_MAT_ID:
+                if (op->src[0]->buffer && (ggml_n_dims(op->src[0]) == 3) &&
+                    op->src[0]->buffer->buft == ggml_backend_cpu_riscv64_pacc_buffer_type() &&
+                    ggml_riscv64_pacc_get_optimal_repack_type(op->src[0])) {
+                    if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
+                        return false;
+                    }
+                    if (op->src[1]->type == GGML_TYPE_F32) {
+                        return true;
+                    }
+                }
+                break;
             case GGML_OP_NORM:
             case GGML_OP_RMS_NORM:
             default:
@@ -899,6 +1203,7 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
     ggml::cpu::tensor_traits * get_tensor_traits(const struct ggml_tensor * op) override {
         switch (op->op) {
             case GGML_OP_MUL_MAT:
+            case GGML_OP_MUL_MAT_ID:
                 if (op->src[0]->buffer && op->src[0]->buffer->buft == ggml_backend_cpu_riscv64_pacc_buffer_type()) {
                     return (ggml::cpu::tensor_traits *) op->src[0]->extra;
                 }
