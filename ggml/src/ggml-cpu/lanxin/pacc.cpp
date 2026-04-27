@@ -672,28 +672,7 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
 
     micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
                                                                   (__bf16 *) (src0_cur + ir0_start * nb01),
-                                                                  &dst_col[ir0_start]);
-
-#if 0                
-		const _Float16 * A = (_Float16 *)src1_col;
-		const _Float16 * b_ptr = (_Float16 *)(src0_cur+ir0_start*nb01);
-
-
-                size_t vl = __riscv_vsetvl_e32m8(MIN(ir0_end-ir0_start, layout_block_n));
-
-                vfloat32m8_t sumf = __riscv_vfmv_v_f_f32m8(0.0f, vl);
-
-		for (int k = 0; k < ne00; k++) {
-			_Float16 a0 = A[k];
-
-                       vfloat16m4_t vb0 = __riscv_vle16_v_f16m4(b_ptr, vl);
-                        b_ptr += vl;
-     
-                        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a0, vb0, vl);
-		}
-               __riscv_vse32_v_f32m8(&dst_col[ir0_start], sumf, vl);
-#endif               
-
+                                                                  &dst_col[ir0_start]);          
 }
 
 
@@ -712,8 +691,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
             case GGML_OP_MUL_MAT_ID:
                 {
                     size = ggml_row_size(GGML_TYPE_F16, ggml_nelements(op->src[1]));
-                    // 猜测fp16应该没有pad的需要
-                    // size = GGML_PAD(size, sizeof(int64_t)); // + padding for next bloc.
+                    size = GGML_PAD(size, sizeof(int64_t)); // + padding for next bloc.
 
                     const int64_t ne02 = op->src[0]->ne[2];  // n_as, n_expert
                     const int64_t ne12 = op->src[1]->ne[2];  // n_tokens
@@ -721,6 +699,8 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
                     const size_t sizeof_mmid_row_mapping = sizeof(int64_t);
 
                     size += sizeof_mmid_row_mapping * ne02 * (ne12 + 1);
+
+                    size += 64; // for atomic_current_chunk which is (char (*)[64]) type.
 
                     return true;
                 }
@@ -881,34 +861,21 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         const int64_t nr0 = ne01;
         const int64_t nr1 = cne1;
 
-        int chunk_size = 16;
-        if (nr0 == 1 || nr1 == 1) {
-            chunk_size = 64;
-        }
 
-	chunk_size = block_n;
-	int chunk_size_n = block_n;
+	int chunk_size_n = 256;
 	int chunk_size_m = 1;
 
-        // disable for NUMA
-        const bool disable_chunking = ggml_is_numa();
+
 
         int64_t nchunk0 = (nr0 + chunk_size_n - 1) / chunk_size_n;
         int64_t nchunk1 = (nr1 + chunk_size_m - 1) / chunk_size_m;
 
-        if (nchunk0 * nchunk1 < nth * 4 || disable_chunking) {
-            nchunk0 = nr0 > nr1 ? nth : 1;
-            nchunk1 = nr0 > nr1 ? 1 : nth;
-        }
 
-        //const int64_t dr0 = (nr0 + nchunk0 - 1) / nchunk0;
-        //const int64_t dr1 = (nr1 + nchunk1 - 1) / nchunk1;
         const int64_t dr0 = chunk_size_n; 
         const int64_t dr1 = chunk_size_m;
 
         int current_chunk = ith;
 
-        //atomic_int * current_chunk_ctr = (atomic_int *)(atomic_current_chunk + cur_a);
         int *current_chunk_ctr = reinterpret_cast<int *>(atomic_current_chunk + cur_a);
 
         while (current_chunk < nchunk0 * nchunk1) {
@@ -930,8 +897,6 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
             if (nth >= nchunk0 * nchunk1) {
                 break;
             }
-
-            //current_chunk = atomic_fetch_add_explicit(current_chunk_ctr, 1, memory_order_relaxed);
             current_chunk = __atomic_fetch_add(current_chunk_ctr, 1, __ATOMIC_RELAXED);
         }
     }
@@ -1091,7 +1056,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
             for (int k = 0; k < K; k++) {
                 const uint16_t * p = (const uint16_t *) (data) + (t*N*K + n * K + k);
-                vuint16m4_t      v = __riscv_vlse16_v_u16m4(p, K * sizeof(int16_t), vl);
+                vuint16m4_t      v = __riscv_vlse16_v_u16m4(p, K * sizeof(uint16_t), vl);
                 __riscv_vse16_v_u16m4(dst_p, v, vl);
                 dst_p += vl;
             }
