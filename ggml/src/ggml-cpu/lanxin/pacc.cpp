@@ -61,6 +61,7 @@
 #define UNUSED GGML_UNUSED
 
 #define QGEMM_STRIDEN_THREAD_ALIGN 32
+#define CACHE_LINE_SIZE 64
 
 // clang-format on
 
@@ -604,7 +605,7 @@ template <typename T> void layout_convert_row(const T * src, std::vector<T> & ds
 }
 
 
-#define CACHE_LINE_SIZE 64
+
 
 #define MMID_MATRIX_ROW(row_id, i1) matrix_rows[(row_id)*ids->ne[0]*ids->ne[1] + (i1)]
 
@@ -700,7 +701,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
                     size += sizeof_mmid_row_mapping * ne02 * (ne12 + 1);
 
-                    size += 64; // for atomic_current_chunk which is (char (*)[64]) type.
+                    size += CACHE_LINE_SIZE * ne02; // for atomic_current_chunk which is (char (*)[64]) type for one expert
 
                     return true;
                 }
