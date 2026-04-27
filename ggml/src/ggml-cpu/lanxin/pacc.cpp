@@ -1079,7 +1079,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         int N = t->ne[1];
         int T = t->ne[2];
 
-        int16_t * dst_p = (int16_t *) t->data;
+        uint16_t * dst_p = (uint16_t *) t->data;
 
         const int block_n = 256;
 
@@ -1090,9 +1090,9 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
             size_t vl = __riscv_vsetvl_e16m4(MIN(remaining,block_n));
 
             for (int k = 0; k < K; k++) {
-                const int16_t * p = (const int16_t *) (data) + (t*N*K + n * K + k);
-                vint16m4_t      v = __riscv_vlse16_v_i16m4(p, K * sizeof(int16_t), vl);
-                __riscv_vse16_v_i16m4(dst_p, v, vl);
+                const uint16_t * p = (const uint16_t *) (data) + (t*N*K + n * K + k);
+                vuint16m4_t      v = __riscv_vlse16_v_u16m4(p, K * sizeof(int16_t), vl);
+                __riscv_vse16_v_u16m4(dst_p, v, vl);
                 dst_p += vl;
             }
 
