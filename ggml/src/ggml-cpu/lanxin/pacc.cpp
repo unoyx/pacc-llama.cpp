@@ -959,7 +959,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
     ggml_barrier(params->threadpool);
 
-    const int block_n = 256;
+    const int block_n = 64;
 
     for (int cur_a = 0; cur_a < n_as; ++cur_a) {
         const int64_t cne1 = matrix_row_counts[cur_a];
@@ -976,7 +976,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         const int64_t nr1 = cne1;
 
 
-	int chunk_size_n = 256;
+	int chunk_size_n = 64;
 	int chunk_size_m = 1;
 
 
@@ -1094,7 +1094,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
         ggml_barrier(params->threadpool);
         //    const int block_n = layout_block_n;
-        const int block_n = 256;
+        const int block_n = 64;
 
         // ============================================================================
         // Block-N 对齐的分块策略
@@ -1151,20 +1151,23 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
     }
 
     int repack(struct ggml_tensor * t, const void * data, size_t data_size) override {
-        GGML_LOG_DEBUG("%s: repack tensor %s with %s_%dx%d\n", __func__, t->name, ggml_type_name(t->type), (int) 256,
+        GGML_LOG_DEBUG("%s: repack tensor %s with %s_%dx%d\n", __func__, t->name, ggml_type_name(t->type), (int) 64,
                        (int) 1);
 
-#if defined(PACC_PERF)
-    int64_t cur = ggml_time_us();
-#endif
+
 
         int K = t->ne[0];
         int N = t->ne[1];
         int T = t->ne[2];
 
+	uint16_t * at = (uint16_t *)malloc(N * K * sizeof(uint16_t));
+
+#if defined(PACC_PERF)
+    int64_t cur = ggml_time_us();
+#endif
         uint16_t * dst_p = (uint16_t *) t->data;
 
-        const int block_n = 256;
+        const int block_n = 64;
 
         for (int t = 0; t < T; t++) {
             for (int n = 0; n < N;) {
@@ -1186,8 +1189,42 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         
 #if defined(PACC_PERF)
     int64_t duration = ggml_time_us() - cur;
-    GGML_LOG_INFO("Repack finished in time: %f, ", (double)duration / 1000.0);
-#endif       
+    GGML_LOG_INFO("Repack finished in time: %f ms\n", (double)duration / 1000.0);
+    printf("tensor size: %d K\n", N*K/1024);
+#endif
+
+#if defined(PACC_PERF)
+    cur = ggml_time_us();
+#endif
+    for (int t = 0; t < T; t++) {
+	    const uint16_t *cur_mat = (const uint16_t *)(data) + (t * N * K);
+
+	    int n = 0;
+
+	    const uint16_t *cur_row = cur_mat;
+
+	    uint16_t *cur_at = at;
+
+	    for (; n + block_n - 1 < N; n+=block_n) {
+
+		    pacc_transpose_mvec_e16_zve32x(block_n, K, cur_row, K, cur_at, block_n);
+
+		    cur_row += block_n * K;
+		    cur_at += block_n * K;
+	    }
+    }
+#if defined(PACC_PERF)
+    duration = ggml_time_us() - cur;
+    GGML_LOG_INFO("NEW Repack finished in time: %f ms\n", (double)duration / 1000.0);
+#endif
+
+    if (memcmp(t->data, at, K*N*sizeof(uint16_t)) == 0) {
+	    printf("Same\n");
+    } else {
+	    printf("Not Same\n");
+    }
+
+        exit(0);
         return 0;
     }
 };
@@ -1206,9 +1243,9 @@ static const ggml::cpu::tensor_traits * ggml_riscv64_pacc_get_optimal_repack_typ
             return &ggml::cpu::riscv64_pacc::q8_0_16x1_q8_0;
         }
     } else if (cur->type == GGML_TYPE_F16 || cur->type == GGML_TYPE_BF16) {
-        if (strncmp(cur->name, "token_embd.weight", 17) == 0) {
-            return nullptr;
-        }
+        //if (strncmp(cur->name, "token_embd.weight", 17) == 0) {
+        //    return nullptr;
+        //}
 
         if (cur->ne[1] % 16 == 0) {
             return &ggml::cpu::riscv64_pacc::pacc_tensor_traits;
