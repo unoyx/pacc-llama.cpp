@@ -309,8 +309,12 @@ static void ggml_compute_forward_mul_mat_one_chunk(const struct ggml_compute_par
 
     const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
 
+    const char * new_src0 = (const char *) src0->data;                          //weight
+    if (strncmp(src0->name, "token_embd.weight", 17) == 0)
+      new_src0 += src0->nb[2];
+
     for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += block_m) {
-        const char * src0_row = (const char *) src0->data + (ir0_start * src0->nb[1]);                          //weight
+        const char * src0_row = new_src0 + (ir0_start * src0->nb[1]);                          //weight
         const char * src1_col = (const char *) wdata + (iir1 * row_size);                                       //active
         float * dst_col  = (float *) ((char *) dst->data + (iir1 * dst->nb[1]) + (ir0_start * sizeof(float)));  //result
         size_t  tile_k_v = ne00;
@@ -1473,6 +1477,11 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
 	const int block_n = __riscv_vsetvlmax_e16m4();
 
+	if (strncmp(t->name, "token_embd.weight", 17) == 0) {
+		memcpy((char *)dst_p, (char*)data, t->nb[2]);
+		dst_p += t->nb[2]/2;
+	}
+
         for (int t = 0; t < T; t++) {
 		const uint16_t *cur_mat = (const uint16_t *)(data) + (t * N * K);
 		const uint16_t *cur_row = cur_mat;
@@ -1511,9 +1520,9 @@ static const ggml::cpu::tensor_traits * ggml_riscv64_pacc_get_optimal_repack_typ
             return &ggml::cpu::riscv64_pacc::q8_0_16x1_q8_0;
         }
     } else if (cur->type == GGML_TYPE_F16 || cur->type == GGML_TYPE_BF16) {
-        if (strncmp(cur->name, "token_embd.weight", 17) == 0) {
-            return nullptr;
-        }
+        //if (strncmp(cur->name, "token_embd.weight", 17) == 0) {
+        //    return nullptr;
+        //}
 
         if (cur->ne[1] % 16 == 0) {
             return &ggml::cpu::riscv64_pacc::pacc_tensor_traits;
@@ -1664,6 +1673,10 @@ static size_t ggml_backend_cpu_riscv64_pacc_nbytes(ggml_backend_buffer_type_t bu
                 nbytes += (tensor->ne[i] - 1) * tensor->nb[i];
             }
         }
+    }
+
+    if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
+	    nbytes = 2 * nbytes + sizeof(int64_t);
     }
 
     GGML_UNUSED(buft);
