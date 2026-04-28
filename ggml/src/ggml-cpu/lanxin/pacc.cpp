@@ -604,6 +604,98 @@ template <typename T> void layout_convert_row(const T * src, std::vector<T> & ds
     }
 }
 
+/* Transposes an M x N row-major matrix (pointed by `a`) to an N x M row-major
+ * matrix (pointed by `at`) using strided segment-8 loads and unit-strided
+ * stores. Vectorization is performed along the M dimension, and N is expected
+ * to be a multiple of 8.
+ */
+void
+pacc_transpose_mvec_x8_e16_zve32x(size_t m, size_t n,
+                                 const uint16_t *GGML_RESTRICT a, size_t rsa,
+                                 uint16_t *GGML_RESTRICT at, size_t rsat) {
+
+  const ptrdiff_t input_seg_bstride = (ptrdiff_t)(rsa * sizeof(uint16_t));
+
+  size_t vl = 0;
+  for (size_t ii = 0; ii + 7 < n; ii += 8) {
+    // NOLINTBEGIN(clang-analyzer-deadcode.DeadStores)
+    vuint16m1x8_t vcols = __riscv_vundefined_u16m1x8();
+    // NOLINTEND(clang-analyzer-deadcode.DeadStores)
+
+    const uint16_t *in_tile = a + ii;
+    uint16_t *out_tile = at + ii * rsat;
+    for (size_t jj = 0; jj  < m; jj += vl) {
+      vl = __riscv_vsetvl_e16m1(m - jj);
+
+      vcols = __riscv_vlsseg8e16_v_u16m1x8(in_tile, input_seg_bstride, vl);
+
+      uint16_t *write_ptr = out_tile;
+      const size_t output_seg_stride = rsat;
+      // store each segment continuously along m
+      __riscv_vse16_v_u16m1(write_ptr, __riscv_vget_v_u16m1x8_u16m1(vcols, 0),
+                            vl);
+      write_ptr += output_seg_stride;
+      __riscv_vse16_v_u16m1(write_ptr, __riscv_vget_v_u16m1x8_u16m1(vcols, 1),
+                            vl);
+      write_ptr += output_seg_stride;
+      __riscv_vse16_v_u16m1(write_ptr, __riscv_vget_v_u16m1x8_u16m1(vcols, 2),
+                            vl);
+      write_ptr += output_seg_stride;
+      __riscv_vse16_v_u16m1(write_ptr, __riscv_vget_v_u16m1x8_u16m1(vcols, 3),
+                            vl);
+      write_ptr += output_seg_stride;
+      __riscv_vse16_v_u16m1(write_ptr, __riscv_vget_v_u16m1x8_u16m1(vcols, 4),
+                            vl);
+      write_ptr += output_seg_stride;
+      __riscv_vse16_v_u16m1(write_ptr, __riscv_vget_v_u16m1x8_u16m1(vcols, 5),
+                            vl);
+      write_ptr += output_seg_stride;
+      __riscv_vse16_v_u16m1(write_ptr, __riscv_vget_v_u16m1x8_u16m1(vcols, 6),
+                            vl);
+      write_ptr += output_seg_stride;
+      __riscv_vse16_v_u16m1(write_ptr, __riscv_vget_v_u16m1x8_u16m1(vcols, 7),
+                            vl);
+
+      in_tile += vl * rsa;
+      out_tile += vl;
+    }
+  }
+}
+
+/* Transposes an M x N row-major matrix (pointed by `a`) to an N x M row-major
+ * matrix (pointed by `at`) with vectorization along the M dimension.
+ */
+void
+pacc_transpose_mvec_e16_zve32x(size_t m, size_t n,
+                              const uint16_t *GGML_RESTRICT a, size_t rsa,
+                              uint16_t *GGML_RESTRICT at, size_t rsat) {
+
+  size_t n_begin = 0;
+  size_t n_end = n_begin + ((n - n_begin) / 8) * 8;
+
+  pacc_transpose_mvec_x8_e16_zve32x(m, n_end - n_begin, a + n_begin, rsa,
+                                   at + n_begin * rsat, rsat);
+
+//   n_begin = n_end;
+//   n_end = n_begin + ((n - n_begin) / 4) * 4;
+
+//   pacc_transpose_mvec_x4_e16_zve32x(m, n_end - n_begin, a + n_begin, rsa,
+//                                    at + n_begin * rsat, rsat);
+
+//   n_begin = n_end;
+//   n_end = n_begin + ((n - n_begin) / 2) * 2;
+
+//   pacc_transpose_mvec_x2_e16_zve32x(m, n_end - n_begin, a + n_begin, rsa,
+//                                    at + n_begin * rsat, rsat);
+
+//   n_begin = n_end;
+//   n_end = n;
+
+//   pacc_transpose_mvec_x1_e16_zve32x(m, n_end - n_begin, a + n_begin, rsa,
+//                                    at + n_begin * rsat, rsat);
+}
+ 
+
 
 
 
