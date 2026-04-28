@@ -309,8 +309,12 @@ static void ggml_compute_forward_mul_mat_one_chunk(const struct ggml_compute_par
 
     const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
 
+    const char * new_src0 = (const char *) src0->data;                          //weight
+	if (strncmp(src0->name, "token_embd.weight", 17) == 0) 
+		new_src0 += src0->nb[2];
+
     for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += block_m) {
-        const char * src0_row = (const char *) src0->data + (ir0_start * src0->nb[1]);                          //weight
+        const char * src0_row = new_src0 + (ir0_start * src0->nb[1]);                          //weight
         const char * src1_col = (const char *) wdata + (iir1 * row_size);                                       //active
         float * dst_col  = (float *) ((char *) dst->data + (iir1 * dst->nb[1]) + (ir0_start * sizeof(float)));  //result
         size_t  tile_k_v = ne00;
@@ -671,8 +675,8 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
     size_t tile_n_v = ir0_end - ir0_start;
     size_t tile_m_v = 1;
 
-    micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
-                                                                  (__bf16 *) (src0_cur + ir0_start * nb01),
+    micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
+                                                                  (_Float16 *) (src0_cur + ir0_start * nb01),
                                                                   &dst_col[ir0_start]);          
 }
 
@@ -687,6 +691,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
             case GGML_OP_MUL_MAT:
                 {
                     size = ggml_row_size(GGML_TYPE_F16, ggml_nelements(op->src[1]));
+
                     return true;
                 }
             case GGML_OP_MUL_MAT_ID:
@@ -847,7 +852,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
     ggml_barrier(params->threadpool);
 
-    const int block_n = 256;
+    const int block_n = 64;
 
     for (int cur_a = 0; cur_a < n_as; ++cur_a) {
         const int64_t cne1 = matrix_row_counts[cur_a];
@@ -864,7 +869,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         const int64_t nr1 = cne1;
 
 
-	int chunk_size_n = 256;
+	int chunk_size_n = 64;
 	int chunk_size_m = 1;
 
 
@@ -982,7 +987,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
         ggml_barrier(params->threadpool);
         //    const int block_n = layout_block_n;
-        const int block_n = 256;
+        const int block_n = 64;
 
         // ============================================================================
         // Block-N 对齐的分块策略
@@ -1048,7 +1053,12 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
         uint16_t * dst_p = (uint16_t *) t->data;
 
-        const int block_n = 256;
+        const int block_n = 64;
+        
+	if (strncmp(t->name, "token_embd.weight", 17) == 0) {
+		memcpy((char *)dst_p, (char*)data, t->nb[2]);
+		dst_p += t->nb[2]/2;
+	}
 
 	for (int t = 0; t < T; t++) {
         for (int n = 0; n < N;) {
@@ -1085,9 +1095,9 @@ static const ggml::cpu::tensor_traits * ggml_riscv64_pacc_get_optimal_repack_typ
             return &ggml::cpu::riscv64_pacc::q8_0_16x1_q8_0;
         }
     } else if (cur->type == GGML_TYPE_F16 || cur->type == GGML_TYPE_BF16) {
-        if (strncmp(cur->name, "token_embd.weight", 17) == 0) {
-            return nullptr;
-        }
+        //if (strncmp(cur->name, "token_embd.weight", 17) == 0) {
+        //    return nullptr;
+        //}
 
         if (cur->ne[1] % 16 == 0) {
             return &ggml::cpu::riscv64_pacc::pacc_tensor_traits;
@@ -1238,6 +1248,10 @@ static size_t ggml_backend_cpu_riscv64_pacc_nbytes(ggml_backend_buffer_type_t bu
                 nbytes += (tensor->ne[i] - 1) * tensor->nb[i];
             }
         }
+    }
+
+    if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
+	    nbytes = 2 * nbytes + sizeof(int64_t);
     }
 
     GGML_UNUSED(buft);
