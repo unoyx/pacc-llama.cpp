@@ -663,6 +663,32 @@ pacc_transpose_mvec_x8_e16_zve32x(size_t m, size_t n,
 }
 
 /* Transposes an M x N row-major matrix (pointed by `a`) to an N x M row-major
+ * matrix (pointed by `at`) using strided loads and unit-strided stores.
+ * Vectorization is performed along the M dimension.
+ */
+void
+pacc_transpose_mvec_x1_e16_zve32x(size_t m, size_t n,
+                                 const uint16_t *GGML_RESTRICT a, size_t rsa,
+                                 uint16_t *GGML_RESTRICT at, size_t rsat) {
+
+  const ptrdiff_t input_bstride = (ptrdiff_t)(rsa * sizeof(uint16_t));
+
+  size_t vl = 0;
+
+  for (size_t ii = 0; ii < n; ii += 1) {
+    const uint16_t *in_tile = a + ii;
+    uint16_t *out_tile = at + ii * rsat;
+    for (size_t jj = 0; jj < m; jj += vl) {
+      vl = __riscv_vsetvl_e16m8(m - jj);
+      vuint16m8_t v_data = __riscv_vlse16_v_u16m8(in_tile, input_bstride, vl);
+      __riscv_vse16_v_u16m8(out_tile, v_data, vl);
+      in_tile += vl * rsa;
+      out_tile += vl;
+    }
+  }
+}
+
+/* Transposes an M x N row-major matrix (pointed by `a`) to an N x M row-major
  * matrix (pointed by `at`) with vectorization along the M dimension.
  */
 void
@@ -688,16 +714,12 @@ pacc_transpose_mvec_e16_zve32x(size_t m, size_t n,
 //   pacc_transpose_mvec_x2_e16_zve32x(m, n_end - n_begin, a + n_begin, rsa,
 //                                    at + n_begin * rsat, rsat);
 
-//   n_begin = n_end;
-//   n_end = n;
+  n_begin = n_end;
+  n_end = n;
 
-//   pacc_transpose_mvec_x1_e16_zve32x(m, n_end - n_begin, a + n_begin, rsa,
-//                                    at + n_begin * rsat, rsat);
+  pacc_transpose_mvec_x1_e16_zve32x(m, n_end - n_begin, a + n_begin, rsa,
+                                   at + n_begin * rsat, rsat);
 }
- 
-
-
-
 
 #define MMID_MATRIX_ROW(row_id, i1) matrix_rows[(row_id)*ids->ne[0]*ids->ne[1] + (i1)]
 
@@ -767,8 +789,6 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
                                                                   (__bf16 *) (src0_cur + ir0_start * nb01),
                                                                   &dst_col[ir0_start]);          
 }
-
-
 
 class pacc_ext_tensor_traits : public tensor_traits_base {
   public:
