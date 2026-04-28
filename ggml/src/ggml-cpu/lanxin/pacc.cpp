@@ -448,7 +448,7 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS> class tensor_
 
         ggml_barrier(params->threadpool);
         //    const int block_n = layout_block_n;
-        const int block_n = 16;
+        const int block_n = 256;
         // ============================================================================
         // Block-N 对齐的分块策略
         // ============================================================================
@@ -1051,6 +1051,11 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
     ggml_vec_dot_t    const vec_dot      = ggml_get_type_traits_cpu(type)->vec_dot;
     enum ggml_type const vec_dot_type    = ggml_get_type_traits_cpu(type)->vec_dot_type;
 
+    bool is_fp16_type = vec_dot_type == GGML_TYPE_F16;
+    bool is_bf16_type = vec_dot_type == GGML_TYPE_BF16;
+    bool is_q8_0_type = vec_dot_type == GGML_TYPE_Q8_0;
+    assert(is_fp16_type || is_bf16_type || is_q8_0_type);
+
     const int64_t _i12 = ir1_start;  // logical row index for this expert
 
     struct mmid_row_mapping row_mapping = MMID_MATRIX_ROW(cur_a, _i12);
@@ -1076,9 +1081,20 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
     size_t tile_n_v = ir0_end - ir0_start;
     size_t tile_m_v = 1;
 
-    micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
+     if (is_bf16_type) {
+            micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
                                                                   (__bf16 *) (src0_cur + ir0_start * nb01),
                                                                   &dst_col[ir0_start]);          
+        } else if (is_fp16_type) {
+            micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
+                                                                  (_Float16 *) (src0_cur + ir0_start * nb01),
+                                                                  &dst_col[ir0_start]);          
+        }
+
+
+   // micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
+//                                                                  (__bf16 *) (src0_cur + ir0_start * nb01),
+  //                                                                &dst_col[ir0_start]);          
 }
 
 class pacc_ext_tensor_traits : public tensor_traits_base {
@@ -1267,7 +1283,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         const int64_t nr1 = cne1;
 
 
-	int chunk_size_n = 256;
+	int chunk_size_n = block_n;
 	int chunk_size_m = 1;
 
 
@@ -1442,7 +1458,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
     }
 
     int repack(struct ggml_tensor * t, const void * data, size_t data_size) override {
-        GGML_LOG_DEBUG("%s: repack tensor %s with %s_%dx%d\n", __func__, t->name, ggml_type_name(t->type), (int) 256,
+        GGML_LOG_DEBUG("%s: repack tensor %s with %s_%dx%d\n", __func__, t->name, ggml_type_name(t->type), (int)__riscv_vsetvlmax_e16m4(),
                        (int) 1);
 
 #if defined(PACC_PERF)
@@ -1455,29 +1471,27 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
         uint16_t * dst_p = (uint16_t *) t->data;
 
-        const int block_n = 256;
+	const int block_n = __riscv_vsetvlmax_e16m4();
 
         for (int t = 0; t < T; t++) {
-            for (int n = 0; n < N;) {
-                int remaining = N - n;
+		const uint16_t *cur_mat = (const uint16_t *)(data) + (t * N * K);
+		const uint16_t *cur_row = cur_mat;
 
-                size_t vl = __riscv_vsetvl_e16m4(MIN(remaining, block_n));
+		int n = 0;
 
-                for (int k = 0; k < K; k++) {
-                    const uint16_t * p = (const uint16_t *) (data) + (t * N * K + n * K + k);
-                    vuint16m4_t      v = __riscv_vlse16_v_u16m4(p, K * sizeof(uint16_t), vl);
-                    __riscv_vse16_v_u16m4(dst_p, v, vl);
-                    dst_p += vl;
-                }
+		for (; n + block_n - 1 < N; n += block_n) {
+			pacc_transpose_mvec_e16_zve32x(block_n, K, cur_row, K, dst_p, block_n);
+			cur_row += block_n * K;
+			dst_p += block_n * K;
+		}
 
-                n += vl;
-            }
-        }
-
+		// Handle the tailing
+		pacc_transpose_nvec_e16_zve32x((N - n), K, cur_row, K, dst_p, (N - n));
+	}
         
 #if defined(PACC_PERF)
     int64_t duration = ggml_time_us() - cur;
-    GGML_LOG_INFO("Repack finished in time: %f, ", (double)duration / 1000.0);
+    GGML_LOG_INFO("Repack finished in time: %f ms\n", (double)duration / 1000.0);
 #endif       
         return 0;
     }
