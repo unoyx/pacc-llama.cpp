@@ -1042,6 +1042,10 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         GGML_LOG_DEBUG("%s: repack tensor %s with %s_%dx%d\n", __func__, t->name, ggml_type_name(t->type), (int) 256,
                        (int) 1);
 
+#if defined(PACC_PERF)
+    int64_t cur = ggml_time_us();
+#endif
+
         int K = t->ne[0];
         int N = t->ne[1];
         int T = t->ne[2];
@@ -1050,23 +1054,28 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
         const int block_n = 256;
 
-	for (int t = 0; t < T; t++) {
-        for (int n = 0; n < N;) {
-            int remaining = N - n;
+        for (int t = 0; t < T; t++) {
+            for (int n = 0; n < N;) {
+                int remaining = N - n;
 
-            size_t vl = __riscv_vsetvl_e16m4(MIN(remaining,block_n));
+                size_t vl = __riscv_vsetvl_e16m4(MIN(remaining, block_n));
 
-            for (int k = 0; k < K; k++) {
-                const uint16_t * p = (const uint16_t *) (data) + (t*N*K + n * K + k);
-                vuint16m4_t      v = __riscv_vlse16_v_u16m4(p, K * sizeof(uint16_t), vl);
-                __riscv_vse16_v_u16m4(dst_p, v, vl);
-                dst_p += vl;
+                for (int k = 0; k < K; k++) {
+                    const uint16_t * p = (const uint16_t *) (data) + (t * N * K + n * K + k);
+                    vuint16m4_t      v = __riscv_vlse16_v_u16m4(p, K * sizeof(uint16_t), vl);
+                    __riscv_vse16_v_u16m4(dst_p, v, vl);
+                    dst_p += vl;
+                }
+
+                n += vl;
             }
-
-            n += vl;
         }
-	}
 
+        
+#if defined(PACC_PERF)
+    int64_t duration = ggml_time_us() - cur;
+    GGML_LOG_INFO("Repack finished in time: %f, ", (double)duration / 1000.0);
+#endif       
         return 0;
     }
 };
