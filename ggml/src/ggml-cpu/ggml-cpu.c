@@ -1702,14 +1702,28 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         return;
     }
 
+#if defined(PACC_PERF)
+    ggml_barrier(params->threadpool);
+    int64_t cur = 0;
+    if (params->ith == 0)
+      cur = ggml_time_us();
+#endif
     // extra_buffer op?
     if (ggml_cpu_extra_compute_forward(params, tensor)) {
+#if defined(PACC_PERF)
+        ggml_barrier(params->threadpool);
+        if (params->ith == 0) {
+            int64_t duration = ggml_time_us() - cur;
+            GGML_LOG_INFO("time: %f, ", (double) duration / 1000.0);
+            display_info(tensor);
+        }
+#endif        
         return;
     }
 
-#if defined(PACC_PERF)
-    int64_t cur = ggml_time_us();
-#endif
+// #if defined(PACC_PERF)
+//      cur = ggml_time_us();
+// #endif
     switch (tensor->op) {
         case GGML_OP_DUP:
             {
@@ -2112,9 +2126,12 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             }
     }
 #if defined(PACC_PERF)
-    int64_t duration = ggml_time_us() - cur;
-    GGML_LOG_INFO("time: %f, ", (double)duration / 1000.0);
-    display_info(tensor);
+    ggml_barrier(params->threadpool);
+    if (params->ith == 0) {
+        int64_t duration = ggml_time_us() - cur;
+        GGML_LOG_INFO("time: %f, ", (double) duration / 1000.0);
+        display_info(tensor);
+    }
 #endif
 }
 
@@ -3426,6 +3443,14 @@ void ggml_cpu_fp16_to_fp32(const ggml_fp16_t * x, float * y, int64_t n) {
 
 void ggml_cpu_fp32_to_bf16(const float * x, ggml_bf16_t * y, int64_t n) {
     int64_t i = 0;
+#if defined(__riscv_zvfbfmin)
+    for (int vl; i < n; i += vl) {
+        vl = __riscv_vsetvl_e32m8(n - i);
+        vfloat32m8_t vx = __riscv_vle32_v_f32m8(&x[i], vl);
+        vbfloat16m4_t vy = __riscv_vfncvtbf16_f_f_w_bf16m4(vx, vl);
+        __riscv_vse16_v_bf16m4((__bf16 *)&y[i], vy, vl);
+    }
+#endif    
     for (; i < n; ++i) {
         y[i] = GGML_FP32_TO_BF16(x[i]);
     }
