@@ -3434,6 +3434,14 @@ void ggml_cpu_fp16_to_fp32(const ggml_fp16_t * x, float * y, int64_t n) {
 
 void ggml_cpu_fp32_to_bf16(const float * x, ggml_bf16_t * y, int64_t n) {
     int64_t i = 0;
+#if defined(__riscv_zvfbfmin)
+    for (int vl; i < n; i += vl) {
+        vl = __riscv_vsetvl_e32m8(n - i);
+        vfloat32m8_t vx = __riscv_vle32_v_f32m8(&x[i], vl);
+        vbfloat16m4_t vy = __riscv_vfncvtbf16_f_f_w_bf16m4(vx, vl);
+        __riscv_vse16_v_bf16m4((__bf16 *)&y[i], vy, vl);
+    }
+#endif    
     for (; i < n; ++i) {
         y[i] = GGML_FP32_TO_BF16(x[i]);
     }
