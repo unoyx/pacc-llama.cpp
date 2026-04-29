@@ -1703,21 +1703,27 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
     }
 
 #if defined(PACC_PERF)
-    int64_t cur = ggml_time_us();
+    ggml_barrier(params->threadpool);
+    int64_t cur = 0;
+    if (params->ith == 0)
+      cur = ggml_time_us();
 #endif
     // extra_buffer op?
     if (ggml_cpu_extra_compute_forward(params, tensor)) {
 #if defined(PACC_PERF)
-    int64_t duration = ggml_time_us() - cur;
-    GGML_LOG_INFO("time: %f, ", (double)duration / 1000.0);
-    display_info(tensor);
+        ggml_barrier(params->threadpool);
+        if (params->ith == 0) {
+            int64_t duration = ggml_time_us() - cur;
+            GGML_LOG_INFO("time: %f, ", (double) duration / 1000.0);
+            display_info(tensor);
+        }
 #endif        
         return;
     }
 
-#if defined(PACC_PERF)
-     cur = ggml_time_us();
-#endif
+// #if defined(PACC_PERF)
+//      cur = ggml_time_us();
+// #endif
     switch (tensor->op) {
         case GGML_OP_DUP:
             {
@@ -2120,9 +2126,12 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             }
     }
 #if defined(PACC_PERF)
-    int64_t duration = ggml_time_us() - cur;
-    GGML_LOG_INFO("time: %f, ", (double)duration / 1000.0);
-    display_info(tensor);
+    ggml_barrier(params->threadpool);
+    if (params->ith == 0) {
+        int64_t duration = ggml_time_us() - cur;
+        GGML_LOG_INFO("time: %f, ", (double) duration / 1000.0);
+        display_info(tensor);
+    }
 #endif
 }
 
