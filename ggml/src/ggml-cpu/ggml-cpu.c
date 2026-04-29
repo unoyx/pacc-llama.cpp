@@ -1702,13 +1702,21 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         return;
     }
 
+#if defined(PACC_PERF)
+    int64_t cur = ggml_time_us();
+#endif
     // extra_buffer op?
     if (ggml_cpu_extra_compute_forward(params, tensor)) {
+#if defined(PACC_PERF)
+    int64_t duration = ggml_time_us() - cur;
+    GGML_LOG_INFO("time: %f, ", (double)duration / 1000.0);
+    display_info(tensor);
+#endif        
         return;
     }
 
 #if defined(PACC_PERF)
-    int64_t cur = ggml_time_us();
+     cur = ggml_time_us();
 #endif
     switch (tensor->op) {
         case GGML_OP_DUP:
