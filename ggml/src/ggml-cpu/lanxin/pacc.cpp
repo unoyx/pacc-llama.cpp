@@ -618,6 +618,91 @@ static void ggml_compute_forward_mul_mat_one_chunk(const struct ggml_compute_par
     }
 }
 
+
+#define MMID_MATRIX_ROW(row_id, i1) matrix_rows[(row_id)*ids->ne[0]*ids->ne[1] + (i1)]
+
+struct mmid_row_mapping {
+	int32_t i1;
+	int32_t i2;
+};
+
+void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
+
+	void * ptr = *p;
+	ptr = (void *) GGML_PAD((uintptr_t) ptr, align);
+	*p = (void *) ((char *) ptr + size);
+	return ptr;
+}
+
+template <int layout_block_n>
+static void ggml_compute_forward_mul_mat_id_one_chunk(
+    struct ggml_tensor * dst,
+    const struct ggml_tensor * src0,
+    const struct ggml_tensor * src1,
+    const struct ggml_tensor * ids,
+    const int64_t cur_a,
+    const int64_t ir0_start,
+    const int64_t ir0_end,
+    const int64_t ir1_start,
+    const int64_t ir1_end,
+    const char * src0_cur,
+    const struct mmid_row_mapping * matrix_rows,
+    const size_t row_size,
+    const bool src1_cont,
+    const void * wdata) {
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+
+    const enum ggml_type type = src0->type;
+    ggml_vec_dot_t    const vec_dot      = ggml_get_type_traits_cpu(type)->vec_dot;
+    enum ggml_type const vec_dot_type    = ggml_get_type_traits_cpu(type)->vec_dot_type;
+
+    bool is_fp16_type = vec_dot_type == GGML_TYPE_F16;
+    bool is_bf16_type = vec_dot_type == GGML_TYPE_BF16;
+    bool is_q8_0_type = vec_dot_type == GGML_TYPE_Q8_0;
+    assert(is_fp16_type || is_bf16_type || is_q8_0_type);
+
+    const int64_t _i12 = ir1_start;  // logical row index for this expert
+
+    struct mmid_row_mapping row_mapping = MMID_MATRIX_ROW(cur_a, _i12);
+    const int               id          = row_mapping.i1;  // selected expert index
+
+    const int64_t i11 = id % ne11;
+    const int64_t i12 = row_mapping.i2;  // row index in src1
+
+    const int64_t i1 = id;               // selected expert index
+    const int64_t i2 = i12;              // row
+
+    // desc: when src1 is not a contiguous memory block we have to calculate the offset using the strides
+    //       if it is, then we have either copied the data to params->wdata and made it contiguous or we are using
+    //       the original src1 data pointer, so we should index using the indices directly
+    // TODO: this is a bit of a hack, we should probably have a better way to handle this
+    const char * src1_col =
+        (const char *) wdata +
+        (src1_cont || src1->type != vec_dot_type ? (i11 + i12 * ne11) * row_size : (i11 * nb11 + i12 * nb12));
+
+    float * dst_col = (float *) ((char *) dst->data + (i1 * nb1 + i2 * nb2));
+
+    size_t tile_k_v = ne00;
+    size_t tile_n_v = ir0_end - ir0_start;
+    size_t tile_m_v = 1;
+
+     if (is_bf16_type) {
+            micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
+                                                                  (__bf16 *) (src0_cur + ir0_start * nb01),
+                                                                  &dst_col[ir0_start]);          
+        } else if (is_fp16_type) {
+            micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
+                                                                  (_Float16 *) (src0_cur + ir0_start * nb01),
+                                                                  &dst_col[ir0_start]);          
+        } else {
+            micro_kernel_q8_0_q8_0fp32_tile_k32_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, src1_col,
+                                                                  (src0_cur + ir0_start * nb01),
+                                                                  &dst_col[ir0_start]);          
+        }
+}
+
+
 namespace ggml::cpu::riscv64_pacc {
 
 template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS>
@@ -666,11 +751,189 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS> class tensor_
                     forward_mul_mat_q8(params, op);
                     return true;
                 }
+            case GGML_OP_MUL_MAT_ID:
+                if (op->src[0]->type == GGML_TYPE_Q8_0) {
+                    forward_mul_mat_id_q8(params, op);
+                    return true;
+                }
             default:
                 // GGML_ABORT("fatal error");
                 break;
         }
         return false;
+    }
+
+    void forward_mul_mat_id_q8(ggml_compute_params * params, ggml_tensor * op) {
+    const struct ggml_tensor * src0 = op->src[0];
+    const struct ggml_tensor * src1 = op->src[1];
+    const struct ggml_tensor * ids = op->src[2];
+        ggml_tensor *              dst  = op;
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const enum ggml_type type = src0->type;
+
+    const bool src1_cont = ggml_is_contiguous(src1);
+
+
+    enum ggml_type const vec_dot_type    = ggml_get_type_traits_cpu(src0->type)->vec_dot_type;
+    const ggml_from_float_t from_float   = ggml_get_type_traits_cpu(src0->type)->from_float;
+
+    // we don't support permuted src0 or src1
+    GGML_ASSERT(nb00 == ggml_type_size(type));
+    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
+
+    // dst cannot be transposed or permuted
+    GGML_ASSERT(nb0 == sizeof(float));
+    GGML_ASSERT(nb0 <= nb1);
+    GGML_ASSERT(nb1 <= nb2);
+    GGML_ASSERT(nb2 <= nb3);
+
+    // row groups
+    const int n_ids = ids->ne[0]; // n_expert_used
+    const int n_as  = ne02;       // n_expert
+
+    void * wdata_cur = (void*)params->wdata;
+
+    if (src1->type != vec_dot_type) {
+        incr_ptr_aligned(&wdata_cur, ggml_row_size(vec_dot_type, ggml_nelements(src1)), sizeof(int64_t));
+    }
+
+    int64_t * matrix_row_counts = // [n_as]
+        (int64_t *)incr_ptr_aligned(&wdata_cur, n_as*sizeof(int64_t), sizeof(int64_t));
+
+    struct mmid_row_mapping * matrix_rows = // [n_as][ids->ne[0]*ids->ne[1]]
+        (struct mmid_row_mapping *)incr_ptr_aligned(&wdata_cur, n_as*ids->ne[0]*ids->ne[1]*sizeof(struct mmid_row_mapping), sizeof(int64_t));
+
+    char (*atomic_current_chunk)[CACHE_LINE_SIZE] = // [n_as]
+        (char (*)[64])incr_ptr_aligned(&wdata_cur, CACHE_LINE_SIZE * n_as, CACHE_LINE_SIZE);
+
+    GGML_ASSERT(params->wsize >= (size_t)((char *) wdata_cur - (char *) params->wdata));
+
+    if (src1->type != vec_dot_type) {
+        char * wdata = (char *)params->wdata;
+
+        const size_t nbw0 = ggml_type_size(vec_dot_type);
+        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
+        const size_t nbw2 = nbw1*ne11;
+        const size_t nbw3 = nbw2*ne12;
+
+        assert(params->wsize >= ne13*nbw3);
+        GGML_ASSERT(src1->type == GGML_TYPE_F32);
+
+#if 0
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = ith; i12 < ne12; i12 += nth) {
+                for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
+                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
+                               ne10);
+                }
+            }
+        }
+#else
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = 0; i12 < ne12; ++i12) {
+                for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                    size_t bs = ggml_blck_size(vec_dot_type);
+                    int64_t ne10_block_start = (ith * ne10/bs) / nth;
+                    int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                               (ne10_block_end - ne10_block_start) * bs);
+                }
+            }
+        }
+#endif
+    }
+
+    if (ith == 0) {
+        // initialize matrix_row_counts
+        memset(matrix_row_counts, 0, n_as*sizeof(int64_t));
+
+        // group rows by src0 matrix
+        for (int64_t iid1 = 0; iid1 < ids->ne[1]; ++iid1) {
+            for (int id = 0; id < n_ids; ++id) {
+                const int32_t i02 = *(const int32_t *) ((const char *) ids->data + iid1*ids->nb[1] + id*ids->nb[0]);
+
+                assert(i02 >= 0 && i02 < n_as);
+
+                MMID_MATRIX_ROW(i02, matrix_row_counts[i02]) = (struct mmid_row_mapping) {id, (int32_t)iid1};
+                matrix_row_counts[i02] += 1;
+            }
+        }
+    }
+
+    // reset current_chunk
+    for (int cur_a = ith; cur_a < n_as; cur_a += nth) {
+        //atomic_int * current_chunk_ctr = (atomic_int *)(atomic_current_chunk + cur_a);
+        //*current_chunk_ctr = nth;
+
+        int *current_chunk_ctr = reinterpret_cast<int *>(atomic_current_chunk + cur_a);
+        __atomic_store_n(current_chunk_ctr, nth, __ATOMIC_RELAXED);
+    }
+
+    ggml_barrier(params->threadpool);
+
+    const int block_n = 256;
+
+    for (int cur_a = 0; cur_a < n_as; ++cur_a) {
+        const int64_t cne1 = matrix_row_counts[cur_a];
+
+        if (cne1 == 0) {
+            continue;
+        }
+    
+        const char * src0_cur = (const char *) src0->data + cur_a * nb02;
+        const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
+        const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+
+        const int64_t nr0 = ne01;
+        const int64_t nr1 = cne1;
+
+
+	int chunk_size_n = block_n;
+	int chunk_size_m = 1;
+
+
+
+        int64_t nchunk0 = (nr0 + chunk_size_n - 1) / chunk_size_n;
+        int64_t nchunk1 = (nr1 + chunk_size_m - 1) / chunk_size_m;
+
+
+        const int64_t dr0 = chunk_size_n; 
+        const int64_t dr1 = chunk_size_m;
+
+        int current_chunk = ith;
+
+        int *current_chunk_ctr = reinterpret_cast<int *>(atomic_current_chunk + cur_a);
+
+        while (current_chunk < nchunk0 * nchunk1) {
+            const int64_t ith0 = current_chunk % nchunk0;
+            const int64_t ith1 = current_chunk / nchunk0;
+
+            const int64_t ir0_start = dr0 * ith0;
+            const int64_t ir0_end = MIN(ir0_start + dr0, nr0);
+
+            const int64_t ir1_start = dr1 * ith1;
+            const int64_t ir1_end = MIN(ir1_start + dr1, nr1);
+
+            ggml_compute_forward_mul_mat_id_one_chunk<block_n>(
+                dst, src0, src1, ids, cur_a,
+                ir0_start, ir0_end, ir1_start, ir1_end,
+                src0_cur, matrix_rows, row_size, src1_cont, wdata
+            );
+
+            if (nth >= nchunk0 * nchunk1) {
+                break;
+            }
+            current_chunk = __atomic_fetch_add(current_chunk_ctr, 1, __ATOMIC_RELAXED);
+        }
+    }
+
     }
 
     void forward_mul_mat_q8(ggml_compute_params * params, ggml_tensor * op) {
@@ -1318,89 +1581,8 @@ void pacc_transpose_e16_zve32x(size_t m, size_t n,
   }
 }
 
-#define MMID_MATRIX_ROW(row_id, i1) matrix_rows[(row_id)*ids->ne[0]*ids->ne[1] + (i1)]
-
-struct mmid_row_mapping {
-	int32_t i1;
-	int32_t i2;
-};
-
-void * incr_ptr_aligned(void ** p, size_t size, size_t align) {
-
-	void * ptr = *p;
-	ptr = (void *) GGML_PAD((uintptr_t) ptr, align);
-	*p = (void *) ((char *) ptr + size);
-	return ptr;
-}
-
-template <int layout_block_n>
-static void ggml_compute_forward_mul_mat_id_one_chunk(
-    struct ggml_tensor * dst,
-    const struct ggml_tensor * src0,
-    const struct ggml_tensor * src1,
-    const struct ggml_tensor * ids,
-    const int64_t cur_a,
-    const int64_t ir0_start,
-    const int64_t ir0_end,
-    const int64_t ir1_start,
-    const int64_t ir1_end,
-    const char * src0_cur,
-    const struct mmid_row_mapping * matrix_rows,
-    const size_t row_size,
-    const bool src1_cont,
-    const void * wdata) {
-
-    GGML_TENSOR_BINARY_OP_LOCALS
-
-    const enum ggml_type type = src0->type;
-    ggml_vec_dot_t    const vec_dot      = ggml_get_type_traits_cpu(type)->vec_dot;
-    enum ggml_type const vec_dot_type    = ggml_get_type_traits_cpu(type)->vec_dot_type;
-
-    bool is_fp16_type = vec_dot_type == GGML_TYPE_F16;
-    bool is_bf16_type = vec_dot_type == GGML_TYPE_BF16;
-    bool is_q8_0_type = vec_dot_type == GGML_TYPE_Q8_0;
-    assert(is_fp16_type || is_bf16_type || is_q8_0_type);
-
-    const int64_t _i12 = ir1_start;  // logical row index for this expert
-
-    struct mmid_row_mapping row_mapping = MMID_MATRIX_ROW(cur_a, _i12);
-    const int               id          = row_mapping.i1;  // selected expert index
-
-    const int64_t i11 = id % ne11;
-    const int64_t i12 = row_mapping.i2;  // row index in src1
-
-    const int64_t i1 = id;               // selected expert index
-    const int64_t i2 = i12;              // row
-
-    // desc: when src1 is not a contiguous memory block we have to calculate the offset using the strides
-    //       if it is, then we have either copied the data to params->wdata and made it contiguous or we are using
-    //       the original src1 data pointer, so we should index using the indices directly
-    // TODO: this is a bit of a hack, we should probably have a better way to handle this
-    const char * src1_col =
-        (const char *) wdata +
-        (src1_cont || src1->type != vec_dot_type ? (i11 + i12 * ne11) * row_size : (i11 * nb11 + i12 * nb12));
-
-    float * dst_col = (float *) ((char *) dst->data + (i1 * nb1 + i2 * nb2));
-
-    size_t tile_k_v = ne00;
-    size_t tile_n_v = ir0_end - ir0_start;
-    size_t tile_m_v = 1;
-
-     if (is_bf16_type) {
-            micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
-                                                                  (__bf16 *) (src0_cur + ir0_start * nb01),
-                                                                  &dst_col[ir0_start]);          
-        } else if (is_fp16_type) {
-            micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
-                                                                  (_Float16 *) (src0_cur + ir0_start * nb01),
-                                                                  &dst_col[ir0_start]);          
-        }
 
 
-   // micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
-//                                                                  (__bf16 *) (src0_cur + ir0_start * nb01),
-  //                                                                &dst_col[ir0_start]);          
-}
 
 class pacc_ext_tensor_traits : public tensor_traits_base {
   public:
@@ -1881,18 +2063,18 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
                     }
                 }
                 break;
-            //case GGML_OP_MUL_MAT_ID:
-            //    if (op->src[0]->buffer && (ggml_n_dims(op->src[0]) == 3) &&
-            //        op->src[0]->buffer->buft == ggml_backend_cpu_riscv64_pacc_buffer_type() &&
-            //        ggml_riscv64_pacc_get_optimal_repack_type(op->src[0])) {
-            //        if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
-            //            return false;
-            //        }
-            //        if (op->src[1]->type == GGML_TYPE_F32) {
-            //            return true;
-            //        }
-            //    }
-            //    break;
+            case GGML_OP_MUL_MAT_ID:
+                if (op->src[0]->buffer && (ggml_n_dims(op->src[0]) == 3) &&
+                    op->src[0]->buffer->buft == ggml_backend_cpu_riscv64_pacc_buffer_type() &&
+                    ggml_riscv64_pacc_get_optimal_repack_type(op->src[0])) {
+                    if (op->src[1]->buffer && !ggml_backend_buft_is_host(op->src[1]->buffer->buft)) {
+                        return false;
+                    }
+                    if (op->src[1]->type == GGML_TYPE_F32) {
+                        return true;
+                    }
+                }
+                break;
             case GGML_OP_NORM:
             case GGML_OP_RMS_NORM:
             default:
@@ -1975,9 +2157,9 @@ static size_t ggml_backend_cpu_riscv64_pacc_nbytes(ggml_backend_buffer_type_t bu
         }
     }
 
-    if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
-	    nbytes = 2 * nbytes + sizeof(int64_t);
-    }
+    //if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
+    //	    nbytes = 2 * nbytes + sizeof(int64_t);
+    //}
 
     GGML_UNUSED(buft);
     return nbytes;
