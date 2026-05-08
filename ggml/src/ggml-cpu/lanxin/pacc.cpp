@@ -461,6 +461,52 @@ static inline void micro_kernel_q8_0_q8_0fp32_tile_k256_tile_n_gemv(int m_v, int
 }
 
 template <int layout_block_n>
+static inline void x_micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv(int ne11, int              m_v,
+                                                                 int              n_v,
+                                                                 int              k_v,
+                                                                 const _Float16 * A,
+                                                                 const _Float16 * B,
+                                                                 float *          C) {
+    const _Float16 * b_ptr = B;
+    int kk = 0;
+
+    size_t vl = __riscv_vsetvl_e32m8(MIN(n_v, layout_block_n));
+
+    vfloat32m8_t sumf = __riscv_vfmv_v_f_f32m8(0.0f, vl);
+
+    for (; kk + 3 < k_v; kk += 4) {
+        _Float16 a0 = A[(kk + 0)*ne11];
+        _Float16 a1 = A[(kk + 1)*ne11];
+        _Float16 a2 = A[(kk + 2)*ne11];
+        _Float16 a3 = A[(kk + 3)*ne11];
+
+        vfloat16m4_t vb0 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        b_ptr += vl;
+        vfloat16m4_t vb1 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        b_ptr += vl;
+        vfloat16m4_t vb2 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        b_ptr += vl;
+        vfloat16m4_t vb3 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        b_ptr += vl;
+
+        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a0, vb0, vl);
+        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a1, vb1, vl);
+        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a2, vb2, vl);
+        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a3, vb3, vl);
+    }
+
+    for (; kk < k_v; ++kk) {
+        _Float16 a0 = A[kk*ne11];
+        vfloat16m4_t vb0 = __riscv_vle16_v_f16m4(b_ptr, vl);
+        sumf = __riscv_vfwmacc_vf_f32m8_tu(sumf, a0, vb0, vl);
+        b_ptr += vl;
+    }
+
+    __riscv_vse32_v_f32m8(C, sumf, vl);
+}
+
+
+template <int layout_block_n>
 static inline void micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv(int              m_v,
                                                                  int              n_v,
                                                                  int              k_v,
@@ -547,7 +593,7 @@ static inline void micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv(int            
         b_ptr += vl;
     }
 
-    __riscv_vse32_v_f32m8(C, sumf, vl);    
+    __riscv_vse32_v_f32m8(C, sumf, vl);
 }
 
 template <int layout_block_n>
@@ -577,7 +623,7 @@ static void ggml_compute_forward_mul_mat_one_chunk(const struct ggml_compute_par
 
     assert(src1_cont == true);
     assert(dst_cont == true);
-    
+
     enum ggml_type const vec_dot_type = ggml_get_type_traits_cpu(type)->vec_dot_type;
 
     bool is_fp16_type = vec_dot_type == GGML_TYPE_F16;
@@ -595,12 +641,13 @@ static void ggml_compute_forward_mul_mat_one_chunk(const struct ggml_compute_par
     const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
 
     const char * new_src0 = (const char *) src0->data;                          //weight
-    //if (strncmp(src0->name, "token_embd.weight", 17) == 0)
-    //  new_src0 += src0->nb[2];
+    if (strncmp(src0->name, "token_embd.weight", 17) == 0)
+      new_src0 += src0->nb[2];
 
     for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += block_m) {
         const char * src0_row = new_src0 + (ir0_start * src0->nb[1]);                          //weight
-        const char * src1_col = (const char *) wdata + (iir1 * row_size);                                       //active
+        //const char * src1_col = (const char *) wdata + (iir1 * row_size);                                       //active
+        const char * src1_col = (const char *) wdata + (iir1 * 2);                                       //active
         float * dst_col  = (float *) ((char *) dst->data + (iir1 * dst->nb[1]) + (ir0_start * sizeof(float)));  //result
         size_t  tile_k_v = ne00;
         size_t  tile_n_v = ir0_end - ir0_start;
@@ -609,7 +656,7 @@ static void ggml_compute_forward_mul_mat_one_chunk(const struct ggml_compute_par
             micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
                                                                    (__bf16 *) src0_row, dst_col);
         } else if (is_fp16_type) {
-            micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
+            x_micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<block_n>(ne11, tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
                                                                    (_Float16 *) src0_row, dst_col);
         } else {
             micro_kernel_q8_0_q8_0fp32_tile_k256_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, src1_col, src0_row,
@@ -690,15 +737,15 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
      if (is_bf16_type) {
             micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
                                                                   (__bf16 *) (src0_cur + ir0_start * nb01),
-                                                                  &dst_col[ir0_start]);          
+                                                                  &dst_col[ir0_start]);
         } else if (is_fp16_type) {
             micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
                                                                   (_Float16 *) (src0_cur + ir0_start * nb01),
-                                                                  &dst_col[ir0_start]);          
+                                                                  &dst_col[ir0_start]);
         } else {
             micro_kernel_q8_0_q8_0fp32_tile_k32_tile_n_gemv<layout_block_n>(tile_m_v, tile_n_v, tile_k_v, src1_col,
                                                                   (src0_cur + ir0_start * nb01),
-                                                                  &dst_col[ir0_start]);          
+                                                                  &dst_col[ir0_start]);
         }
 }
 
@@ -878,7 +925,7 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS> class tensor_
 
     ggml_barrier(params->threadpool);
 
-    const int block_n = 256;
+    const int block_n = 64;
 
     for (int cur_a = 0; cur_a < n_as; ++cur_a) {
         const int64_t cne1 = matrix_row_counts[cur_a];
@@ -886,7 +933,7 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS> class tensor_
         if (cne1 == 0) {
             continue;
         }
-    
+
         const char * src0_cur = (const char *) src0->data + cur_a * nb02;
         const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
@@ -904,7 +951,7 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS> class tensor_
         int64_t nchunk1 = (nr1 + chunk_size_m - 1) / chunk_size_m;
 
 
-        const int64_t dr0 = chunk_size_n; 
+        const int64_t dr0 = chunk_size_n;
         const int64_t dr1 = chunk_size_m;
 
         int current_chunk = ith;
@@ -1013,7 +1060,7 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS> class tensor_
 
         ggml_barrier(params->threadpool);
         //    const int block_n = layout_block_n;
-        const int block_n = 256;
+        const int block_n = 64;
         // ============================================================================
         // Block-N 对齐的分块策略
         // ============================================================================
@@ -1603,7 +1650,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
                     const int64_t ne12 = op->src[1]->ne[2];  // n_tokens
 		    const struct ggml_tensor * ids = op->src[2];
                     // matrix_row_counts
-                    size += n_as * sizeof(int64_t) + sizeof(int64_t);							     
+                    size += n_as * sizeof(int64_t) + sizeof(int64_t);
 		    // matrix_rows
                     size += n_as*ids->ne[0]*ids->ne[1]*sizeof(struct mmid_row_mapping) + sizeof(int64_t);
 
@@ -1753,7 +1800,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
     ggml_barrier(params->threadpool);
 
-    const int block_n = 256;
+    const int block_n = 64;
 
     for (int cur_a = 0; cur_a < n_as; ++cur_a) {
         const int64_t cne1 = matrix_row_counts[cur_a];
@@ -1761,7 +1808,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         if (cne1 == 0) {
             continue;
         }
-    
+
         const char * src0_cur = (const char *) src0->data + cur_a * nb02;
         const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
@@ -1779,7 +1826,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         int64_t nchunk1 = (nr1 + chunk_size_m - 1) / chunk_size_m;
 
 
-        const int64_t dr0 = chunk_size_n; 
+        const int64_t dr0 = chunk_size_n;
         const int64_t dr1 = chunk_size_m;
 
         int current_chunk = ith;
@@ -1808,7 +1855,31 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
             current_chunk = __atomic_fetch_add(current_chunk_ctr, 1, __ATOMIC_RELAXED);
         }
     }
-    
+
+    }
+
+    void from_float_with_transpose(const float * x, ggml_fp16_t * y, int64_t row, int64_t row_len, int64_t col, int64_t n) {
+        int64_t i = 0;
+#if defined(__riscv_zvfh)
+        ptrdiff_t stride = row_len * 2;
+        for (int vl; i < n; i += vl) {
+            vl = __riscv_vsetvl_e32m2(n - i);
+            vfloat32m2_t vx = __riscv_vle32_v_f32m2(&x[i], vl);
+            vfloat16m1_t vy = __riscv_vfncvt_f_f_w_f16m1(vx, vl);
+            ggml_fp16_t * np = y + (col + i) * row_len + row;
+            __riscv_vsse16_v_f16m1((_Float16 *)np, stride, vy, vl);
+            //__riscv_vse16_v_f16m1((_Float16 *)&y[i], vy, vl);
+        }
+#endif
+        for (; i < n; ++i) {
+            //y[i] = GGML_CPU_FP32_TO_FP16(x[i]);
+            // y is the fixed, the wdata
+            // col is the ne10_block_start
+            // row_len is the total element number of one row in transposed matrix, should be ne01
+            // row is the i11 from ne11, the original row number
+            ggml_fp16_t * np = y + (col + i) * row_len + row;
+            *np = GGML_CPU_FP32_TO_FP16(x[i]);
+        }
     }
 
     void forward_mul_mat_f16(ggml_compute_params * params, ggml_tensor * op) {
@@ -1871,10 +1942,25 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
                         int64_t ne10_block_start = (ith * ne10 / bs) / nth;
                         int64_t ne10_block_end   = ((ith + 1) * ne10 / bs) / nth;
 
-                        from_float((float *) ((char *) src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11 +
+			if (ith == 2) {
+				volatile int x = 100;
+			}
+
+                        //void from_float_with_transpose(const float * x, ggml_fp16_t * y, int64_t row, int64_t row_len, int64_t col, int64_t n) {
+
+                        from_float_with_transpose((float *) ((char *) src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11 +
                                               ne10_block_start * bs * nb10),
-                                   (void *) (wdata + i13 * nbw3 + i12 * nbw2 + i11 * nbw1 + ne10_block_start * nbw0),
-                                   (ne10_block_end - ne10_block_start) * bs);
+                                   (ggml_fp16_t *) (wdata),
+                                   i11,
+                                   ne11,
+                                   ne10_block_start,
+                                   (ne10_block_end - ne10_block_start) * bs
+                                   );
+
+                        //from_float((float *) ((char *) src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11 +
+                        //                      ne10_block_start * bs * nb10),
+                        //           (void *) (wdata + i13 * nbw3 + i12 * nbw2 + i11 * nbw1 + ne10_block_start * nbw0),
+                        //           (ne10_block_end - ne10_block_start) * bs);
                     }
                 }
             }
@@ -1888,7 +1974,24 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
         ggml_barrier(params->threadpool);
         //    const int block_n = layout_block_n;
-        const int block_n = 256;
+        //
+        //
+        // Let the thread-0 print part of the wdata to verify our code
+        //if (ith == 0) {
+        //    printf("\n");
+        //    for (int i = 0; i < 16; i++) {
+        //        uint16_t * rp = (uint16_t *)(params->wdata) + i * ne11;
+        //        for (int j = 0; j < 4; j++) {
+        //            uint16_t d = rp[j];
+        //            printf("%d ", d);
+        //        }
+
+        //        printf("\n");
+        //    }
+        //    printf("\n");
+        //}
+        //exit(0);
+        const int block_n = 64;
 
         // ============================================================================
         // Block-N 对齐的分块策略
@@ -1980,11 +2083,11 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 		// Handle the tailing
 		pacc_transpose_nvec_e16_zve32x((N - n), K, cur_row, K, dst_p, (N - n));
 	}
-        
+
 #if defined(PACC_PERF)
     int64_t duration = ggml_time_us() - cur;
     GGML_LOG_INFO("Repack finished in time: %f ms\n", (double)duration / 1000.0);
-#endif       
+#endif
         return 0;
     }
 };
@@ -2157,9 +2260,9 @@ static size_t ggml_backend_cpu_riscv64_pacc_nbytes(ggml_backend_buffer_type_t bu
         }
     }
 
-    //if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
-    //	    nbytes = 2 * nbytes + sizeof(int64_t);
-    //}
+    if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
+    	    nbytes = 2 * nbytes + sizeof(int64_t);
+    }
 
     GGML_UNUSED(buft);
     return nbytes;

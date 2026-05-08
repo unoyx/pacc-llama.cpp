@@ -4,7 +4,7 @@ install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE llama ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
-target_link_options(llama-simple PRIVATE
-    -static-libstdc++
-    -static-libgcc
-)
+#target_link_options(llama-simple PRIVATE
+	#    -static-libc++
+#    -static-libgcc
+#)
