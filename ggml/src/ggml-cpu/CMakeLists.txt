@@ -472,7 +472,7 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
             set(MARCH_STR "rv64gc")
             if (GGML_RVV)
                 string(APPEND MARCH_STR "v")
-		string(APPEND MARCH_STR "_zba_zbb_zbc_zbs_zicond")
+		string(APPEND MARCH_STR "_zba_zbb_zbc_zbs_zicond_xsfmmbase_xsfmm64t_xsfmm32a16f")
             endif()
 
             if (GGML_RV_ZFH)

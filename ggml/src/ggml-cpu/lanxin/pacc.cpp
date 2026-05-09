@@ -597,6 +597,184 @@ static inline void micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv(int            
 }
 
 template <int layout_block_n>
+static void ggml_compute_forward_mul_mat_one_chunk_pacc(const struct ggml_compute_params * params,
+                                                   struct ggml_tensor *               dst,
+                                                   const enum ggml_type               type,
+                                                   const int64_t                      num_rows_per_vec_dot,
+                                                   const int64_t                      ir0_start,
+                                                   const int64_t                      ir0_end,
+                                                   const int64_t                      ir1_start,
+                                                   const int64_t                      ir1_end) {
+    constexpr int block_n = layout_block_n;
+    constexpr int block_m = 64;
+
+    //{type = GGML_TYPE_Q8_0, buffer = 0x4b62a90, ne = {1024, 6144, 1, 1}, nb = {34, 1088, 6684672, 6684672}, op = GGML_OP_NONE,
+    const struct ggml_tensor * src0 = dst->src[0];
+
+    //type = GGML_TYPE_F32, buffer = 0x91a180, ne = {1024, 4, 1, 1}, nb = {4, 4096, 16384, 16384}, op = GGML_OP_MUL,
+    const struct ggml_tensor * src1 = dst->src[1];
+
+    GGML_TENSOR_BINARY_OP_LOCALS
+
+    const bool src1_cont = ggml_is_contiguous(src1);
+    const bool dst_cont  = ggml_is_contiguous(dst);
+
+    assert(ir0_start % block_n == 0);
+
+    assert(src1_cont == true);
+    assert(dst_cont == true);
+
+    enum ggml_type const vec_dot_type = ggml_get_type_traits_cpu(type)->vec_dot_type;
+
+    bool is_fp16_type = vec_dot_type == GGML_TYPE_F16;
+    bool is_bf16_type = vec_dot_type == GGML_TYPE_BF16;
+    bool is_q8_0_type = vec_dot_type == GGML_TYPE_Q8_0;
+    assert(is_fp16_type || is_bf16_type || is_q8_0_type);
+
+    //printf("ir0_start = %6lld, ir0_end = %6lld, ir1_start = %6lld, ir1_end = %6lld\n", ir0_start, ir0_end, ir1_start, ir1_end);
+
+    const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+    if (ir0_start >= ir0_end || ir1_start >= ir1_end) {
+        return;
+    }
+
+    const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
+
+    const char * new_src0 = (const char *) src0->data;                          //weight
+    if (strncmp(src0->name, "token_embd.weight", 17) == 0)
+      new_src0 += src0->nb[2];
+
+#if 0
+
+(gdb) p *src1
+$7 = {type = GGML_TYPE_F32, buffer = 0x2aab243a10, ne = {1024, 4, 1, 1}, nb = {4, 4096, 16384, 16384}, op = GGML_OP_MUL, op_params = {0 <repeats 16 times>},
+  flags = 16, src = {0x2aab78a900, 0x2aad4e9900, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}, view_src = 0x0, view_offs = 0, data = 0x2aad7267a0,
+  name = "attn_norm-0", '\000' <repeats 52 times>, extra = 0x0, padding = "\000\000\000\000\000\000\000"}
+(gdb) p *src0
+$8 = {type = GGML_TYPE_F16, buffer = 0x2aad533360, ne = {1024, 2048, 1, 1}, nb = {2, 2048, 4194304, 4194304}, op = GGML_OP_NONE, op_params = {
+    0 <repeats 16 times>}, flags = 0, src = {0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}, view_src = 0x0, view_offs = 0, data = 0x3efd1ff080,
+  name = "blk.0.attn_q.weight", '\000' <repeats 44 times>, extra = 0x2aab0efe60 <ggml::cpu::riscv64_pacc::pacc_tensor_traits>,
+  padding = "\000\000\000\000\000\000\000"}
+
+
+#endif
+    const int64_t M0 = ne11; // 4 in this case 
+    const int64_t N0 = ne01; // 2048 in this case
+    const int64_t K0 = ne00; // 1024 in this case
+
+    // 1tm2tn
+    const uint16_t * lhs0_ptr = (const uint16_t *)wdata + ir0_start; 
+    const uint16_t * rhs0_ptr = (const uint16_t *)new_src0 + ir1_start * K0 * 64;
+    const uint16_t * rhs1_ptr = (const uint16_t *)new_src0 + (ir1_start+64) * K0 * 64;
+
+
+    const size_t dim_k = K0;
+
+    size_t tm = 0;
+    size_t tn = 0;
+    size_t tk = 0;
+
+    vuint16m4_t lhs0_data0 = __riscv_vundefined_u16m4();
+    vuint16m4_t lhs0_data1 = __riscv_vundefined_u16m4();
+    vuint16m4_t rhs0_data0 = __riscv_vundefined_u16m4();
+    vuint16m4_t rhs0_data1 = __riscv_vundefined_u16m4();
+    vuint16m4_t rhs1_data0 = __riscv_vundefined_u16m4();
+    vuint16m4_t rhs1_data1 = __riscv_vundefined_u16m4();
+
+    __asm__ volatile("sf.vsettnt zero, zero, e16, w2");
+    __asm__ volatile("sf.vsettm %0, %1" : "=r"(tm) : "r"(ir0_end - ir0_start));
+    __asm__ volatile("sf.vsettn %0, %1" : "=r"(tn) : "r"(64)); //FIXME
+    __asm__ volatile("sf.vtzero.t mt0");
+    __asm__ volatile("sf.vtzero.t mt4");
+
+    // For f16 data type, K_MAX is 2.
+    __asm__ volatile("sf.vsettk %0, %1" : "=r"(tk) : "r"(dim_k));
+
+    for (size_t k = 0; k < dim_k / 2; ++k) {
+	    // setup vl for tm dim
+        __asm__ volatile("sf.vsettn zero, %0" : : "r"(tm));
+
+	__asm__ volatile("vle16.v %0, (%1)"
+                         : "=vr"(lhs0_data0)
+                         : "r"(lhs0_ptr));
+        lhs0_ptr += M0;
+        __asm__ volatile("vle16.v %0, (%1)"
+                         : "=vr"(lhs0_data1)
+                         : "r"(lhs0_ptr));
+        lhs0_ptr += M0;
+
+	vuint16m8_t lhs0_data =
+            __riscv_vcreate_v_u16m4_u16m8(lhs0_data0, lhs0_data1);
+
+	// setup vl for tn dim
+        __asm__ volatile("sf.vsettn zero, %0" : : "r"(tn));
+        __asm__ volatile("vle16.v %0, (%1)"
+                         : "=vr"(rhs0_data0)
+                         : "r"(rhs0_ptr));
+        rhs0_ptr += tn;
+        __asm__ volatile("vle16.v %0, (%1)"
+                         : "=vr"(rhs0_data1)
+                         : "r"(rhs0_ptr));
+        rhs0_ptr += tn;
+
+        vuint16m8_t rhs0_data =
+            __riscv_vcreate_v_u16m4_u16m8(rhs0_data0, rhs0_data1);
+
+	__asm__ volatile("sf.mm.f.f mt0, %0, %1"
+                         :
+                         : "vr"(lhs0_data), "vr"(rhs0_data));
+    }
+
+    //for (size_t m = 0; m < M0; m += tm) {
+    //  __asm__ volatile("sf.vsettm %0, %1" : "=r"(tm) : "r"(M0 - m));
+
+
+    //  for (size_t n = 0; n < N0; n += tn) {
+    //    __asm__ volatile("sf.vsettn %0, %1" : "=r"(tn) : "r"(N0 - n));
+    //    const size_t tmtn_stride = m * N0 + n;
+    //    __asm__ volatile("sf.vtzero.t mt0");
+    //    __asm__ volatile("sf.vtzero.t mt4");
+
+    //    const uint16_t* lhs0_ptr = lhs0_panel + m;
+    //    const uint16_t* rhs0_ptr = rhs0_panel + n;
+    //    const uint16_t* rhs1_ptr = rhs1_panel + n;
+
+    //    // For f16 data type, K_MAX is 2.
+    //  __asm__ volatile("sf.vsettk %0, %1" : "=r"(tk) : "r"(dim_k));
+    //  for (size_t k = 0; k < dim_k / 2; ++k) {
+    //  }
+
+    //  }
+
+    //}
+
+
+
+
+
+    //for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += block_m) {
+    //    const char * src0_row = new_src0 + (ir0_start * src0->nb[1]);                          //weight
+    //    //const char * src1_col = (const char *) wdata + (iir1 * row_size);                                       //active
+    //    const char * src1_col = (const char *) wdata + (iir1 * 2);                                       //active
+    //    float * dst_col  = (float *) ((char *) dst->data + (iir1 * dst->nb[1]) + (ir0_start * sizeof(float)));  //result
+    //    size_t  tile_k_v = ne00;
+    //    size_t  tile_n_v = ir0_end - ir0_start;
+    //    size_t  tile_m_v = MIN(ir1_end - iir1, block_m);
+    //    if (is_bf16_type) {
+    //        micro_kernel_bf16bf16fp32_tile_k1_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, (__bf16 *) src1_col,
+    //                                                               (__bf16 *) src0_row, dst_col);
+    //    } else if (is_fp16_type) {
+    //        x_micro_kernel_fp16fp16fp32_tile_k1_tile_n_gemv<block_n>(ne11, tile_m_v, tile_n_v, tile_k_v, (_Float16 *) src1_col,
+    //                                                               (_Float16 *) src0_row, dst_col);
+    //    } else {
+    //        micro_kernel_q8_0_q8_0fp32_tile_k256_tile_n_gemv<block_n>(tile_m_v, tile_n_v, tile_k_v, src1_col, src0_row,
+    //                                                                 dst_col);
+    //    }
+    //}
+}
+
+
+template <int layout_block_n>
 static void ggml_compute_forward_mul_mat_one_chunk(const struct ggml_compute_params * params,
                                                    struct ggml_tensor *               dst,
                                                    const enum ggml_type               type,
@@ -1973,25 +2151,8 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         }
 
         ggml_barrier(params->threadpool);
-        //    const int block_n = layout_block_n;
-        //
-        //
-        // Let the thread-0 print part of the wdata to verify our code
-        //if (ith == 0) {
-        //    printf("\n");
-        //    for (int i = 0; i < 16; i++) {
-        //        uint16_t * rp = (uint16_t *)(params->wdata) + i * ne11;
-        //        for (int j = 0; j < 4; j++) {
-        //            uint16_t d = rp[j];
-        //            printf("%d ", d);
-        //        }
 
-        //        printf("\n");
-        //    }
-        //    printf("\n");
-        //}
-        //exit(0);
-        const int block_n = 64;
+        const int block_n = 128;
 
         // ============================================================================
         // Block-N 对齐的分块策略
@@ -2014,8 +2175,10 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         // This is the size of the rest of the dimensions of the result
         const int64_t nr1 = ne1 * ne2 * ne3;
 
+	// 1tm1tn
         int     chunk_size_n = block_n;
-        int     chunk_size_m = 1;
+        int     chunk_size_m = 64;
+
         int64_t nchunk0      = (nr0 + chunk_size_n - 1) / chunk_size_n;
         int64_t nchunk1      = (nr1 + chunk_size_m - 1) / chunk_size_m;
 
@@ -2036,7 +2199,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
             const int64_t ir1_start = dr1 * ith1;
             const int64_t ir1_end   = MIN(ir1_start + dr1, nr1);
 
-            ggml_compute_forward_mul_mat_one_chunk<block_n>(params, dst, src0->type, 0, ir0_start, ir0_end, ir1_start,
+            ggml_compute_forward_mul_mat_one_chunk_pacc<block_n>(params, dst, src0->type, 0, ir0_start, ir0_end, ir1_start,
                                                             ir1_end);
 
             if (nth >= nchunk0 * nchunk1) {
@@ -2061,7 +2224,8 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
 
         uint16_t * dst_p = (uint16_t *) t->data;
 
-	const int block_n = __riscv_vsetvlmax_e16m4();
+	//const int block_n = __riscv_vsetvlmax_e16m4();
+	const int block_n = 64; 
 
 	if (strncmp(t->name, "token_embd.weight", 17) == 0) {
 		memcpy((char *)dst_p, (char*)data, t->nb[2]);
