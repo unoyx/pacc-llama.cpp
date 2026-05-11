@@ -790,21 +790,22 @@ static void ggml_compute_forward_mul_mat_one_chunk_mm(const struct ggml_compute_
     vuint16m4_t rhs0_data0 = __riscv_vundefined_u16m4();
     vuint16m4_t rhs0_data1 = __riscv_vundefined_u16m4();    
 
-    __asm__ volatile("sf.vsettnt zero, zero, e16, w2");
+    __asm__ volatile("sf.vsettnt zero, zero, e16alt, w2");
     __asm__ volatile("sf.vsettm %0, %1" : "=r"(tm) : "r"(ir1_end - ir1_start));
     __asm__ volatile("sf.vsettn %0, %1" : "=r"(tn) : "r"(ir0_end - ir0_start));
     __asm__ volatile("sf.vtzero.t mt0");
     __asm__ volatile("sf.vtzero.t mt4");
     __asm__ volatile("sf.vtzero.t mt8");
     __asm__ volatile("sf.vtzero.t mt12");
-    
-    
-    const int np = (block_n & ~(256 - 1));
+
+    const int te = 32;
+
+    const int np = (block_n & ~(4*te - 1));
 
     // We will use block_n which should be 256 in this case and 4 tile registers from 64T
     size_t n = 0;
 
-    for (; n < np; n += 256) {
+    for (; n < np; n += 4*te) {
         __asm__ volatile("sf.vsettn %0, %1" : "=r"(tn) : "r"(block_n - n));
 
         __asm__ volatile("sf.vtzero.t mt0");
@@ -814,9 +815,9 @@ static void ggml_compute_forward_mul_mat_one_chunk_mm(const struct ggml_compute_
 
         lhs0_ptr = (const uint16_t *)wdata + ir1_start;
         const uint16_t * rhs0_block_ptr = rhs0_ptr + n;
-        const uint16_t * rhs1_block_ptr = rhs0_ptr + n + 32;
-        const uint16_t * rhs2_block_ptr = rhs0_ptr + n + 64;
-        const uint16_t * rhs3_block_ptr = rhs0_ptr + n + 96;
+        const uint16_t * rhs1_block_ptr = rhs0_ptr + n + te;
+        const uint16_t * rhs2_block_ptr = rhs0_ptr + n + te + te;
+        const uint16_t * rhs3_block_ptr = rhs0_ptr + n + te + te + te;
         
         // For f16 data type, K_MAX is 2.
         __asm__ volatile("sf.vsettk %0, %1" : "=r"(tk) : "r"(dim_k));
@@ -904,11 +905,11 @@ static void ggml_compute_forward_mul_mat_one_chunk_mm(const struct ggml_compute_
             (float *) ((char *) dst->data + (ir1_start * dst->nb[1]) + ((ir0_start + n) * sizeof(float)));  //result
 
         float * out01_ptr = (float *) ((char *) dst->data + (ir1_start * dst->nb[1]) +
-                                       ((ir0_start + n + 32) * sizeof(float)));  //result
+                                       ((ir0_start + n + te) * sizeof(float)));  //result
         float * out02_ptr = (float *) ((char *) dst->data + (ir1_start * dst->nb[1]) +
-                                       ((ir0_start + n + 64) * sizeof(float)));  //result
+                                       ((ir0_start + n + te + te) * sizeof(float)));  //result
         float * out03_ptr = (float *) ((char *) dst->data + (ir1_start * dst->nb[1]) +
-                                       ((ir0_start + n + 96) * sizeof(float)));  //result
+                                       ((ir0_start + n + te + te + te) * sizeof(float)));  //result
 
         const size_t tile_specifier_shift = 27;
         size_t       mt0_tss              = 0;
