@@ -790,7 +790,11 @@ static void ggml_compute_forward_mul_mat_one_chunk_mm(const struct ggml_compute_
     vuint16m4_t rhs0_data0 = __riscv_vundefined_u16m4();
     vuint16m4_t rhs0_data1 = __riscv_vundefined_u16m4();    
 
-    __asm__ volatile("sf.vsettnt zero, zero, e16alt, w2");
+    if (is_fp16_type)
+      __asm__ volatile("sf.vsettnt zero, zero, e16, w2");
+    else
+      __asm__ volatile("sf.vsettnt zero, zero, e16alt, w2");
+
     __asm__ volatile("sf.vsettm %0, %1" : "=r"(tm) : "r"(ir1_end - ir1_start));
     __asm__ volatile("sf.vsettn %0, %1" : "=r"(tn) : "r"(ir0_end - ir0_start));
     __asm__ volatile("sf.vtzero.t mt0");
@@ -930,6 +934,45 @@ static void ggml_compute_forward_mul_mat_one_chunk_mm(const struct ggml_compute_
     }
 
     assert(n != block_n);
+}
+
+static void from_float_fp16_with_transpose(const float * x,
+                                           void *        ay,
+                                           int64_t       row,
+                                           int64_t       row_len,
+                                           int64_t       col,
+                                           int64_t       n) {
+    int64_t       i = 0;
+    ggml_fp16_t * y = (ggml_fp16_t *) ay;
+#if defined(__riscv_zvfh)
+    ptrdiff_t stride = row_len * 2;
+    for (int vl; i < n; i += vl) {
+        vl               = __riscv_vsetvl_e32m2(n - i);
+        vfloat32m2_t  vx = __riscv_vle32_v_f32m2(&x[i], vl);
+        vfloat16m1_t  vy = __riscv_vfncvt_f_f_w_f16m1(vx, vl);
+        ggml_fp16_t * np = y + (col + i) * row_len + row;
+        __riscv_vsse16_v_f16m1((_Float16 *) np, stride, vy, vl);
+        //__riscv_vse16_v_f16m1((_Float16 *)&y[i], vy, vl);
+    }
+#endif
+    for (; i < n; ++i) {
+        // y is the fixed, the wdata
+        // col is the ne10_block_start
+        // row_len is the total element number of one row in transposed matrix, should be ne01
+        // row is the i11 from ne11, the original row number
+        ggml_fp16_t * np = y + (col + i) * row_len + row;
+        *np              = GGML_CPU_FP32_TO_FP16(x[i]);
+    }
+}
+
+static void from_float_bf16_with_transpose(const float * x,
+                                           void *        ay,
+                                           int64_t       row,
+                                           int64_t       row_len,
+                                           int64_t       col,
+                                           int64_t       n) {
+    int64_t       i = 0;
+    ggml_bf16_t * y = (ggml_bf16_t *) ay;
 }
 
 class pacc_ext_tensor_traits : public tensor_traits_base {
@@ -1155,34 +1198,7 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
     }
     }
 
-    void from_float_with_transpose(const float * x,
-                                   ggml_fp16_t * y,
-                                   int64_t       row,
-                                   int64_t       row_len,
-                                   int64_t       col,
-                                   int64_t       n) {
-        int64_t i = 0;
-#if defined(__riscv_zvfh)
-        ptrdiff_t stride = row_len * 2;
-        for (int vl; i < n; i += vl) {
-            vl               = __riscv_vsetvl_e32m2(n - i);
-            vfloat32m2_t  vx = __riscv_vle32_v_f32m2(&x[i], vl);
-            vfloat16m1_t  vy = __riscv_vfncvt_f_f_w_f16m1(vx, vl);
-            ggml_fp16_t * np = y + (col + i) * row_len + row;
-            __riscv_vsse16_v_f16m1((_Float16 *) np, stride, vy, vl);
-            //__riscv_vse16_v_f16m1((_Float16 *)&y[i], vy, vl);
-        }
-#endif
-        for (; i < n; ++i) {
-            //y[i] = GGML_CPU_FP32_TO_FP16(x[i]);
-            // y is the fixed, the wdata
-            // col is the ne10_block_start
-            // row_len is the total element number of one row in transposed matrix, should be ne01
-            // row is the i11 from ne11, the original row number
-            ggml_fp16_t * np = y + (col + i) * row_len + row;
-            *np              = GGML_CPU_FP32_TO_FP16(x[i]);
-        }
-    }
+
 
     void forward_mul_mat_f16(ggml_compute_params * params, ggml_tensor * op) {
         const struct ggml_tensor * src0 = op->src[0];
@@ -1195,7 +1211,6 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         const int nth = params->nth;
 
         enum ggml_type const vec_dot_type    = ggml_get_type_traits_cpu(src0->type)->vec_dot_type;
-        const ggml_from_float_t from_float   = ggml_get_type_traits_cpu(src0->type)->from_float;
 
         GGML_ASSERT(ne0 == ne01);
         GGML_ASSERT(ne1 == ne11);
@@ -1228,6 +1243,11 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
         GGML_ASSERT(is_fp16_type | is_bf16_type | is_q8_0_type);
         //GGML_ASSERT(is_repack);
 
+        void (*from_float)(const float *, void *, int64_t, int64_t, int64_t, int64_t) = from_float_fp16_with_transpose;
+        if (is_bf16_type) {
+            from_float = from_float_bf16_with_transpose;
+        }
+
         if (src1->type != vec_dot_type) {
             char * wdata = (char *) params->wdata;
 
@@ -1244,10 +1264,10 @@ class pacc_ext_tensor_traits : public tensor_traits_base {
                         int64_t ne10_block_start = (ith * ne10 / bs) / nth;
                         int64_t ne10_block_end   = ((ith + 1) * ne10 / bs) / nth;
 
-                        from_float_with_transpose((float *) ((char *) src1->data + i13 * nb13 + i12 * nb12 +
-                                                             i11 * nb11 + ne10_block_start * bs * nb10),
-                                                  (ggml_fp16_t *) (wdata), i11, ne11, ne10_block_start,
-                                                  (ne10_block_end - ne10_block_start) * bs);
+                        from_float((float *) ((char *) src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11 +
+                                              ne10_block_start * bs * nb10),
+                                   (void *) (wdata), i11, ne11, ne10_block_start,
+                                   (ne10_block_end - ne10_block_start) * bs);
                     }
                 }
             }
