@@ -973,7 +973,25 @@ static void from_float_bf16_with_transpose(const float * x,
                                            int64_t       n) {
     int64_t       i = 0;
     ggml_bf16_t * y = (ggml_bf16_t *) ay;
-}
+#if defined(__riscv_zvfbfmin)
+        ptrdiff_t stride = row_len * 2;
+        for (int vl; i < n; i += vl) {
+            vl               = __riscv_vsetvl_e32m8(n - i);
+            vfloat32m8_t  vx = __riscv_vle32_v_f32m8(&x[i], vl);
+            vbfloat16m4_t  vy = __riscv_vfncvtbf16_f_f_w_bf16m4(vx, vl);
+            ggml_bf16_t * np = y + (col + i) * row_len + row;
+            __riscv_vsse16_v_bf16m4((__bf16 *) np, stride, vy, vl);
+        }
+#endif
+        for (; i < n; ++i) {
+            // y is the fixed, the wdata
+            // col is the ne10_block_start
+            // row_len is the total element number of one row in transposed matrix, should be ne01
+            // row is the i11 from ne11, the original row number
+            ggml_bf16_t * np = y + (col + i) * row_len + row;
+            *np              = GGML_FP32_TO_BF16(x[i]);
+        }
+    }
 
 class pacc_ext_tensor_traits : public tensor_traits_base {
   public:
