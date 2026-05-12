@@ -802,7 +802,7 @@ static void ggml_compute_forward_mul_mat_one_chunk_mm(const struct ggml_compute_
     __asm__ volatile("sf.vtzero.t mt8");
     __asm__ volatile("sf.vtzero.t mt12");
 
-    const int te = 32;
+    const int te = 64;
 
     const int np = (block_n & ~(4*te - 1));
 
