@@ -804,10 +804,11 @@ static void ggml_compute_forward_mul_mat_one_chunk_mm(const struct ggml_compute_
 
     const int te = 64;
 
-    const int np = (block_n & ~(4*te - 1));
+    block_n = MIN((ir0_end - ir0_start), layout_block_n);
+    int np = (block_n & ~(4*te - 1));
 
     // We will use block_n which should be 256 in this case and 4 tile registers from 64T
-    size_t n = 0;
+    int n = 0;
 
     for (; n < np; n += 4*te) {
         __asm__ volatile("sf.vsettn %0, %1" : "=r"(tn) : "r"(block_n - n));
@@ -933,7 +934,72 @@ static void ggml_compute_forward_mul_mat_one_chunk_mm(const struct ggml_compute_
         }
     }
 
-    assert(n != block_n);
+    // Handle the tailing case.
+    for (; n < block_n; n += tn) {
+        __asm__ volatile("sf.vsettn %0, %1" : "=r"(tn) : "r"(block_n - n));
+
+        __asm__ volatile("sf.vtzero.t mt0");
+
+        lhs0_ptr = (const uint16_t *) wdata + ir1_start;
+
+        const uint16_t * rhs0_block_ptr = rhs0_ptr + n;
+
+        // For f16 data type, K_MAX is 2.
+        __asm__ volatile("sf.vsettk %0, %1" : "=r"(tk) : "r"(dim_k));
+
+        for (size_t k = 0; k < dim_k / 2; ++k) {
+            // setup vl for tm dim
+            __asm__ volatile("sf.vsettn zero, %0" : : "r"(tm));
+
+            __asm__ volatile("vle16.v %0, (%1)" : "=vr"(lhs0_data0) : "r"(lhs0_ptr));
+            lhs0_ptr += M0;
+            __asm__ volatile("vle16.v %0, (%1)" : "=vr"(lhs0_data1) : "r"(lhs0_ptr));
+            lhs0_ptr += M0;
+
+            vuint16m8_t lhs0_data = __riscv_vcreate_v_u16m4_u16m8(lhs0_data0, lhs0_data1);
+
+            // setup vl for tn dim
+            __asm__ volatile("sf.vsettn zero, %0" : : "r"(tn));
+            __asm__ volatile("vle16.v %0, (%1)" : "=vr"(rhs0_data0) : "r"(rhs0_block_ptr));
+            rhs0_block_ptr += block_n;
+            __asm__ volatile("vle16.v %0, (%1)" : "=vr"(rhs0_data1) : "r"(rhs0_block_ptr));
+            rhs0_block_ptr += block_n;
+
+            vuint16m8_t rhs0_data = __riscv_vcreate_v_u16m4_u16m8(rhs0_data0, rhs0_data1);
+
+            __asm__ volatile("sf.mm.f.f mt0, %0, %1" : : "vr"(lhs0_data), "vr"(rhs0_data));
+        }
+
+        size_t k_remainder = dim_k & 1;
+        if (k_remainder) {
+            __asm__ volatile("sf.vsettk %0, %1" : "=r"(tk) : "r"(k_remainder));
+            // setup vl for tm dim
+            __asm__ volatile("sf.vsettn zero, %0" : : "r"(tm));
+            __asm__ volatile("vle16.v %0, (%1)" : "=vr"(lhs0_data0) : "r"(lhs0_ptr));
+            lhs0_ptr += M0;
+
+            vuint16m8_t lhs0_data = __riscv_vcreate_v_u16m4_u16m8(lhs0_data0, lhs0_data1);
+
+            // setup vl for tn dim
+            __asm__ volatile("sf.vsettn zero, %0" : : "r"(tn));
+            __asm__ volatile("vle16.v %0, (%1)" : "=vr"(rhs0_data0) : "r"(rhs0_block_ptr));
+            rhs0_block_ptr += block_n;
+
+            vuint16m8_t rhs0_data = __riscv_vcreate_v_u16m4_u16m8(rhs0_data0, rhs0_data1);
+
+            __asm__ volatile("sf.mm.f.f mt0, %0, %1" : : "vr"(lhs0_data), "vr"(rhs0_data));
+        }
+
+        float * out00_ptr =
+            (float *) ((char *) dst->data + (ir1_start * dst->nb[1]) + ((ir0_start + n) * sizeof(float)));  //result
+
+        size_t mt0_tss = 0;
+
+        for (size_t i = 0; i < tm; ++i) {
+            __asm__ volatile("sf.vste32 %0, (%1)" : : "r"(mt0_tss++), "r"(out00_ptr));
+            out00_ptr += N0;
+        }
+    }
 }
 
 static void from_float_fp16_with_transpose(const float * x,
