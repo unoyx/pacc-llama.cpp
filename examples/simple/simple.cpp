@@ -7,7 +7,7 @@
 
 static void print_usage(int, char ** argv) {
     printf("\nexample usage:\n");
-    printf("\n    %s -m model.gguf [-n n_predict] [-ngl n_gpu_layers] [prompt]\n", argv[0]);
+    printf("\n    %s -m model.gguf [-n n_predict] [-ngl n_gpu_layers] [-t thread_num] [-b thread_batch][prompt]\n", argv[0]);
     printf("\n");
 }
 
@@ -22,6 +22,9 @@ int main(int argc, char ** argv) {
     int ngl = 99;
     // number of tokens to predict
     int n_predict = 32;
+
+    int n_threads = GGML_DEFAULT_N_THREADS;
+    int n_thread_batch = GGML_DEFAULT_N_THREADS;
 
     // parse command line arguments
 
@@ -59,7 +62,31 @@ int main(int argc, char ** argv) {
                     print_usage(argc, argv);
                     return 1;
                 }
-            } else {
+            } else if (strcmp(argv[i], "-t") == 0) {
+                if (i + 1 < argc) {
+                    try {
+                        n_threads = std::stoi(argv[++i]);
+                    } catch (...) {
+                        print_usage(argc, argv);
+                        return 1;
+                    }
+                } else {
+                    print_usage(argc, argv);
+                    return 1;
+                }
+            } else if (strcmp(argv[i], "-b") == 0) {
+                if (i + 1 < argc) {
+                    try {
+                        n_thread_batch = std::stoi(argv[++i]);
+                    } catch (...) {
+                        print_usage(argc, argv);
+                        return 1;
+                    }
+                } else {
+                    print_usage(argc, argv);
+                    return 1;
+                }
+            }else {
                 // prompt starts here
                 break;
             }
@@ -109,6 +136,8 @@ int main(int argc, char ** argv) {
     // initialize the context
 
     llama_context_params ctx_params = llama_context_default_params();
+    ctx_params.n_threads = n_threads;
+    ctx_params.n_threads_batch = n_thread_batch;
     // n_ctx is the context size
     ctx_params.n_ctx = n_prompt + n_predict - 1;
     // n_batch is the maximum number of tokens that can be processed in a single call to llama_decode
